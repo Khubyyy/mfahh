@@ -160,6 +160,9 @@ export async function seedBaseData(db: DB, today: string) {
       .values({
         id: 1,
         name: "Turnkey Publishers",
+        address: "27/C, Mezzanine floor, 13th Commercial Street, Phase II Ext DHA, Karachi.",
+        phone: "021-35393151-52",
+        email: "publishersturnkey@gmail.com",
         settings: { makerChecker: true, mfaRoles: ["admin", "accountant"], sessionIdleMinutes: 30 },
       })
       .onConflictDoNothing();

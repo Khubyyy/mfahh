@@ -195,6 +195,12 @@ const party = () => ({
 export const customers = pgTable("customers", {
   ...party(),
   creditLimit: money("credit_limit").notNull().default(0),
+  /** Default line discount % applied to this customer's orders and invoices (reviewable). */
+  discountPct: numeric("discount_pct", { precision: 6, scale: 2, mode: "number" })
+    .notNull()
+    .default(0),
+  /** Area classification, e.g. Karachi / Outside Karachi (a customizable category). */
+  location: text("location").notNull().default("Karachi"),
 });
 export const suppliers = pgTable("suppliers", { ...party() });
 
@@ -252,6 +258,27 @@ export const expenseHeads = pgTable("expense_heads", {
     .references(() => accounts.id),
   status: text("status").$type<"Active" | "Inactive">().notNull().default("Active"),
   ...tracking(),
+});
+
+/** User-managed category lists (products, customers, customer locations, suppliers). */
+export const categories = pgTable(
+  "categories",
+  {
+    id: id(),
+    kind: text("kind").$type<CategoryKind>().notNull(),
+    name: text("name").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status").$type<"Active" | "Inactive">().notNull().default("Active"),
+    ...tracking(),
+  },
+  (t) => [uniqueIndex("categories_kind_name").on(t.kind, sql`lower(${t.name})`)],
+);
+export type CategoryKind = "product" | "customer" | "customerLocation" | "supplier";
+
+/** Counters for automatically generated master codes (CUST-0001, BK-0001...). */
+export const codeSeries = pgTable("code_series", {
+  prefix: text("prefix").primaryKey(),
+  next: integer("next").notNull().default(1),
 });
 
 /* ------------------------------------------------------------------- HR */

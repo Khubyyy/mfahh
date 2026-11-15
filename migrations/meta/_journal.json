@@ -15,6 +15,20 @@
       "when": 1793029572805,
       "tag": "0001_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794757296589,
+      "tag": "0002_categories_discounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794757297196,
+      "tag": "0003_feedback_seed",
+      "breakpoints": true
     }
   ]
 }

@@ -23,9 +23,16 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StatusBadge } from "@/components/shared/StatusBadge";
-import { useAction, useApi } from "@/lib/api";
+import { errorText, useAction, useApi } from "@/lib/api";
 import { formatAmount, formatDate, formatDateTime, formatPKR } from "@/lib/format";
-import { getDocument, transitionDocument, type DocumentDetail } from "@/server/functions/documents";
+import {
+  convertInvoiceToOrder,
+  getDocument,
+  transitionDocument,
+  type DocumentDetail,
+} from "@/server/functions/documents";
+import { useQueryClient } from "@tanstack/react-query";
+import { ClipboardList } from "lucide-react";
 import type { DocType } from "@/shared/documents";
 import type { DocInput } from "@/server/posting/prepare";
 import { DocumentEditor } from "./DocumentEditor";
@@ -45,6 +52,8 @@ function toInput(d: DocumentDetail): Partial<DocInput> {
     "month",
     "loanType",
     "installment",
+    "paidTo",
+    "department",
   ];
   return {
     date: s(doc, "date"),
@@ -83,6 +92,7 @@ function toInput(d: DocumentDetail): Partial<DocInput> {
         allowances: Number(l["allowances"] ?? 0),
         deductions: Number(l["deductions"] ?? 0),
         recovery: Number(l["recovery"] ?? 0),
+        ...(l["condition"] ? { condition: String(l["condition"]) } : {}),
       },
     })),
     allocations: d.allocations
@@ -91,11 +101,35 @@ function toInput(d: DocumentDetail): Partial<DocInput> {
   };
 }
 
-export function DocumentView({ id, onClose }: { id: string; onClose: () => void }) {
+export function DocumentView({
+  id,
+  onClose,
+  startEditing = false,
+}: {
+  id: string;
+  onClose: () => void;
+  startEditing?: boolean;
+}) {
   const q = useApi(["document", id], () => getDocument({ data: { id } }));
+  const qc = useQueryClient();
   const [reasonFor, setReasonFor] = useState<"reject" | "cancel" | null>(null);
   const [reason, setReason] = useState("");
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(startEditing);
+  const [converting, setConverting] = useState(false);
+  const toOrder = async () => {
+    setConverting(true);
+    try {
+      const res = await convertInvoiceToOrder({ data: { invoiceId: id } });
+      toast.success(
+        `Sales order ${res.docNo} recorded for this invoice (no extra stock or ledger entries).`,
+      );
+      await qc.invalidateQueries();
+    } catch (e) {
+      toast.error(errorText(e));
+    } finally {
+      setConverting(false);
+    }
+  };
   const [follow, setFollow] = useState<{
     type: DocInput["type"];
     initial: Partial<DocInput>;
@@ -174,6 +208,11 @@ export function DocumentView({ id, onClose }: { id: string; onClose: () => void 
         ]
       : []),
     ...(doc["expenseHead"] ? [["Expense head", s(doc, "expenseHead")] as [string, string]] : []),
+    ...(doc["paidTo"] ? [["Paid to", s(doc, "paidTo")] as [string, string]] : []),
+    ...(doc["department"] ? [["Department", s(doc, "department")] as [string, string]] : []),
+    ...(doc["fromInvoice"]
+      ? [["Recorded from invoice", s(doc, "fromInvoice")] as [string, string]]
+      : []),
     ...(doc["reference"] ? [["Reference", s(doc, "reference")] as [string, string]] : []),
     ...["issuedTo", "purpose", "expectedReturn", "reason", "condition", "month", "loanType"]
       .filter((k) => doc[k])
@@ -455,8 +494,24 @@ export function DocumentView({ id, onClose }: { id: string; onClose: () => void 
               <Printer />
               Print / PDF
             </Button>
+            {d.can.toOrder && (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={converting}
+                onClick={() => void toOrder()}
+              >
+                <ClipboardList />
+                Create sales order
+              </Button>
+            )}
             {d.can.edit && (
-              <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+              <Button
+                variant="outline"
+                size="sm"
+                title={status === "Pending" ? "Editing sends it back to draft" : undefined}
+                onClick={() => setEditing(true)}
+              >
                 <Pencil />
                 Edit
               </Button>
@@ -570,7 +625,7 @@ function LinesTable({ type, lines }: { type: DocType; lines: Row[] }) {
         rows={lines.map((l) => ({
           ...l,
           item: l["productName"]
-            ? `${s(l, "productCode")} ${s(l, "productName")}`
+            ? `${s(l, "productName")} (${s(l, "productCode")})`
             : l["partyName"]
               ? `${s(l, "partyType")}: ${s(l, "partyName")}`
               : `${s(l, "accountCode")} ${s(l, "accountName")}`,
@@ -611,17 +666,28 @@ function LinesTable({ type, lines }: { type: DocType; lines: Row[] }) {
         ]}
       />
     );
+  if (type === "EXP" && lines.length)
+    return (
+      <SimpleTable
+        rows={lines}
+        cols={[
+          ["description", "Description"],
+          ["amount", "Amount", "amt"],
+        ]}
+      />
+    );
   if (["RV", "PV", "EXP", "LOAN"].includes(type)) return null;
   const rows = lines.map((l) => ({
     ...l,
     item: l["productName"]
-      ? `${s(l, "productCode")} · ${s(l, "productName")}`
+      ? `${s(l, "productName")} (${s(l, "productCode")})`
       : `${s(l, "accountName")}: ${s(l, "description")}`,
   }));
   const cols: Col[] = [
     ["item", "Item"],
     ["qty", "Qty"],
   ];
+  if (type === "SR") cols.push(["condition", "Condition"]);
   if (type === "SO" || type === "SMP" || type === "SI" || type === "PI")
     cols.push(["doneQty", type === "SO" ? "Delivered" : "Returned"]);
   if (!["SMP", "SMR", "ADJ", "DMG"].includes(type))

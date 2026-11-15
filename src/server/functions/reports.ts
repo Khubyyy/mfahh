@@ -467,76 +467,137 @@ export const getStockStatement = createServerFn({ method: "GET" })
       to: isoDate,
       category: z.string().optional(),
       className: z.string().optional(),
+      productId: z.string().uuid().optional(),
     }),
   )
   .handler(({ data }) =>
     safe(async () => {
       await reportUser("reports.view", "inventory.manage", "books.manage");
       const db = getDb();
-      const products = await db.select().from(t.products).orderBy(asc(t.products.code));
+      const products = await db.select().from(t.products).orderBy(asc(t.products.name));
       const open = await db.execute<{ product_id: string; qty: string; value: string }>(sql`
       select product_id, sum(qty_in - qty_out) qty, sum(case when qty_in > 0 then value else -value end) value
       from stock_ledger where date < ${data.from} group by product_id`);
+      // Net movement per product, document type and original direction. Reversals (cancelled
+      // documents) are classed with the movement they undo, so they net it off.
       const moves = await db.execute<{
         product_id: string;
-        kind: string;
-        qin: string;
-        qout: string;
+        type: string;
+        dir: string;
+        net: string;
         vin: string;
         vout: string;
       }>(sql`
-      select s.product_id, ${MOVE_KIND} kind, sum(s.qty_in) qin, sum(s.qty_out) qout,
+      select s.product_id, d.type, case when (s.qty_in > 0) <> s.is_reversal then 'in' else 'out' end dir,
+             sum(s.qty_in - s.qty_out) net,
              sum(case when s.qty_in > 0 then s.value else 0 end) vin, sum(case when s.qty_out > 0 then s.value else 0 end) vout
       from stock_ledger s join documents d on d.id = s.document_id
-      where s.date between ${data.from} and ${data.to} group by s.product_id, d.type`);
+      where s.date between ${data.from} and ${data.to} group by 1, 2, 3`);
       const o = new Map(open.map((r) => [r.product_id, { qty: Number(r.qty), value: n(r.value) }]));
       const m = new Map<string, Record<string, number>>();
       for (const r of moves) {
         const acc = m.get(r.product_id) ?? {};
-        const net = Number(r.qin) - Number(r.qout);
-        acc[r.kind] = (acc[r.kind] ?? 0) + net;
-        acc["inQty"] = (acc["inQty"] ?? 0) + Number(r.qin);
-        acc["outQty"] = (acc["outQty"] ?? 0) + Number(r.qout);
+        const k = `${r.type}:${r.dir}`;
+        acc[k] = (acc[k] ?? 0) + Number(r.net);
         acc["inValue"] = round2((acc["inValue"] ?? 0) + n(r.vin));
         acc["outValue"] = round2((acc["outValue"] ?? 0) + n(r.vout));
+        if (r.type === "OB") acc["obValue"] = round2((acc["obValue"] ?? 0) + n(r.vin) - n(r.vout));
         m.set(r.product_id, acc);
       }
       const rows = products
         .filter(
           (p) =>
             (!data.category || p.category === data.category) &&
-            (!data.className || p.className === data.className),
+            (!data.className || p.className === data.className) &&
+            (!data.productId || p.id === data.productId),
         )
         .map((p) => {
           const op = o.get(p.id) ?? { qty: 0, value: 0 };
           const mv = m.get(p.id) ?? {};
-          const closingQty = op.qty + (mv["inQty"] ?? 0) - (mv["outQty"] ?? 0);
+          const g = (k: string) => mv[k] ?? 0;
+          const z = (x: number) => x || 0; // no "-0"
+          const openingQty = op.qty + g("OB:in");
+          const purchases = g("PI:in");
+          const supplierReturns = z(-g("PR:out"));
+          const sales = z(-g("SI:out"));
+          const salesReturns = g("SR:in");
+          const samplesOut = z(-g("SMP:out"));
+          const samplesIn = g("SMR:in");
+          const adjustments = g("ADJ:in") + g("ADJ:out");
+          const damaged = z(-(g("DMG:out") + g("SR:out")));
+          const closingQty =
+            openingQty +
+            purchases -
+            supplierReturns -
+            sales +
+            salesReturns -
+            samplesOut +
+            samplesIn +
+            adjustments -
+            damaged;
           const closingValue = round2(op.value + (mv["inValue"] ?? 0) - (mv["outValue"] ?? 0));
           return {
+            id: p.id,
             code: p.code,
             name: p.name,
             className: p.className,
             subject: p.subject,
             category: p.category,
             status: p.status,
-            openingQty: op.qty,
-            openingValue: op.value,
-            received: (mv["purchases"] ?? 0) + (mv["salesReturns"] ?? 0) + (mv["opening"] ?? 0),
-            sold: -((mv["sales"] ?? 0) + (mv["purchaseReturns"] ?? 0)),
-            samples: -((mv["samplesOut"] ?? 0) + (mv["samplesIn"] ?? 0)),
-            adjustments: (mv["adjustments"] ?? 0) + (mv["damaged"] ?? 0),
+            openingQty,
+            // Opening-stock entries dated inside the period count as opening, not as receipts.
+            openingValue: round2(op.value + (mv["obValue"] ?? 0)),
+            purchases,
+            supplierReturns,
+            sales,
+            salesReturns,
+            samplesOut,
+            samplesIn,
+            samples: z(samplesOut - samplesIn),
+            adjustments,
+            damaged,
+            // Older summary columns kept for existing screens.
+            received: purchases + salesReturns,
+            sold: sales + supplierReturns,
             closingQty,
             closingValue,
             unitCost: closingQty > 0 ? round2(closingValue / closingQty) : 0,
             minStock: p.minStock,
+            damagedTotal: p.damagedQty,
           };
         })
         .filter(
-          (r) => r.openingQty || r.closingQty || r.received || r.sold || r.samples || r.adjustments,
+          (r) =>
+            data.productId ||
+            r.openingQty ||
+            r.closingQty ||
+            r.purchases ||
+            r.sales ||
+            r.salesReturns ||
+            r.supplierReturns ||
+            r.samples ||
+            r.adjustments ||
+            r.damaged,
         );
       return toRows(rows);
     }),
   );
+
+/** Plain-language name for a stock movement ("Sale", "Sales return – damaged", "Purchase"…). */
+function movementLabel(type: string, isIn: boolean, reversal: boolean) {
+  const base: Record<string, string> = {
+    PI: "Purchase",
+    PR: "Supplier return",
+    SI: "Sale",
+    SR: isIn !== reversal ? "Sales return" : "Sales return – to damaged",
+    SMP: "Sample issued",
+    SMR: "Sample returned",
+    ADJ: isIn !== reversal ? "Adjustment (in)" : "Adjustment (out)",
+    DMG: "Damaged / write-off",
+    OB: "Opening stock",
+  };
+  return `${base[type] ?? type}${reversal ? " (cancelled)" : ""}`;
+}
 
 export const getStockMovement = createServerFn({ method: "GET" })
   .validator(z.object({ from: isoDate, to: isoDate, productId: z.string().uuid() }))
@@ -550,9 +611,12 @@ export const getStockMovement = createServerFn({ method: "GET" })
         sql`select sum(qty_in - qty_out) qty from stock_ledger where product_id = ${data.productId} and date < ${data.from}`,
       );
       const rows = await db.execute<Record<string, string>>(sql`
-      select s.date::text, d.doc_no, d.id doc_id, d.type, s.qty_in, s.qty_out, s.unit_cost, s.value, s.balance_qty, s.is_reversal, d.narration
+      select s.date::text, d.doc_no, d.id doc_id, d.type, s.qty_in, s.qty_out, s.unit_cost, s.value, s.balance_qty, s.is_reversal, d.narration,
+        d.reference, coalesce(c.name, sp.name, '') party
       from stock_ledger s join documents d on d.id = s.document_id
-      where s.product_id = ${data.productId} and s.date between ${data.from} and ${data.to} order by s.id`);
+      left join customers c on c.id = d.party_id and d.party_type = 'customer'
+      left join suppliers sp on sp.id = d.party_id and d.party_type = 'supplier'
+      where s.product_id = ${data.productId} and s.date between ${data.from} and ${data.to} order by s.date, s.id`);
       return {
         product: {
           code: p.code,
@@ -575,6 +639,13 @@ export const getStockMovement = createServerFn({ method: "GET" })
             balanceQty: Number(r["balance_qty"]),
             reversal: String(r["is_reversal"]) === "true",
             narration: r["narration"],
+            reference: r["reference"],
+            party: r["party"],
+            movement: movementLabel(
+              r["type"]!,
+              Number(r["qty_in"]) > 0,
+              String(r["is_reversal"]) === "true",
+            ),
           })),
         ),
       };
@@ -588,6 +659,7 @@ const SALES_GROUPS = [
   "month",
   "customer",
   "customerCategory",
+  "customerLocation",
   "product",
   "className",
   "subject",
@@ -613,7 +685,8 @@ export const getSalesReport = createServerFn({ method: "GET" })
         month: sql`to_char(d.date, 'YYYY-MM')`,
         customer: sql`c.name`,
         customerCategory: sql`c.category`,
-        product: sql`p.code || ' · ' || p.name`,
+        customerLocation: sql`c.location`,
+        product: sql`p.name || ' (' || p.code || ')'`,
         className: sql`coalesce(nullif(p.class_name, ''), '—')`,
         subject: sql`coalesce(nullif(p.subject, ''), '—')`,
         category: sql`p.category`,
@@ -630,6 +703,15 @@ export const getSalesReport = createServerFn({ method: "GET" })
       join customers c on c.id = d.party_id left join products p on p.id = l.product_id
       where d.type in ('SI', 'SR') and d.status = 'Approved' and d.date between ${data.from} and ${data.to}
       group by grp order by ${data.groupBy === "date" || data.groupBy === "month" ? sql`grp` : sql`gross desc`}`);
+      // Customer-wise: closing receivable as at the end of the period.
+      const outstanding = new Map<string, number>();
+      if (data.groupBy === "customer") {
+        const bal = await getDb().execute<{ name: string; bal: string }>(sql`
+          select c.name, sum(g.debit - g.credit) bal from gl_entries g join accounts a on a.id = g.account_id
+          join customers c on c.id = g.party_id
+          where a.system_key = 'AR' and g.party_type = 'customer' and g.date <= ${data.to} group by c.name`);
+        for (const b of bal) outstanding.set(b.name, n(b.bal));
+      }
       return toRows(
         rows.map((r) => {
           const net = round2(n(r["gross"]) - n(r["returns"]));
@@ -645,6 +727,7 @@ export const getSalesReport = createServerFn({ method: "GET" })
             net,
             cost,
             margin: round2(net - cost),
+            outstanding: data.groupBy === "customer" ? (outstanding.get(r["grp"]!) ?? 0) : null,
           };
         }),
       );
@@ -661,7 +744,7 @@ export const getPurchaseReport = createServerFn({ method: "GET" })
         month: sql`to_char(d.date, 'YYYY-MM')`,
         supplier: sql`s.name`,
         supplierCategory: sql`s.category`,
-        product: sql`coalesce(p.code || ' · ' || p.name, a.name || ': ' || l.description)`,
+        product: sql`coalesce(p.name || ' (' || p.code || ')', a.name || ': ' || l.description)`,
         kind: sql`coalesce(d.kind, '—')`,
       }[data.groupBy];
       const rows = await getDb().execute<Record<string, string>>(sql`
@@ -689,13 +772,103 @@ export const getPurchaseReport = createServerFn({ method: "GET" })
     }),
   );
 
+/** Customer receipts: the receipts register (detail) or totals by date, customer or method. */
+export const getReceiptsReport = createServerFn({ method: "GET" })
+  .validator(
+    z.object({
+      from: isoDate,
+      to: isoDate,
+      groupBy: z.enum(["detail", "date", "customer", "method"]),
+      customerId: z.string().uuid().optional(),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      await reportUser("reports.view", "sales.approve");
+      const rows = await getDb().execute<Record<string, string>>(sql`
+      select d.id, d.date::text date, d.doc_no, c.name customer, c.code, d.method, d.cheque_no, d.reference,
+        d.narration, coalesce(b.name, '') bank, d.total
+      from documents d join customers c on c.id = d.party_id
+      left join bank_accounts b on b.id = d.bank_account_id
+      where d.type = 'RV' and d.status = 'Approved' and d.date between ${data.from} and ${data.to}
+        ${data.customerId ? sql`and d.party_id = ${data.customerId}` : sql``}
+      order by d.date, d.doc_no`);
+      const describe = (r: Record<string, string>) =>
+        r["method"] === "Cheque"
+          ? `Cheque Received${r["cheque_no"] ? ` # ${r["cheque_no"]}` : ""}`
+          : r["method"] === "Online"
+            ? "Online Received"
+            : r["method"] === "Bank"
+              ? "Bank Deposit Received"
+              : "Cash Received";
+      const detail = rows.map((r) => ({
+        id: r["id"],
+        date: r["date"],
+        docNo: r["doc_no"],
+        customer: r["customer"],
+        code: r["code"],
+        method: r["method"],
+        description: describe(r),
+        account: r["method"] === "Cash" ? "Cash in hand" : r["bank"],
+        reference: r["reference"],
+        narration: r["narration"],
+        amount: n(r["total"]),
+      }));
+      if (data.groupBy === "detail") return toRows(detail);
+      const key = (r: (typeof detail)[number]) =>
+        data.groupBy === "date" ? r.date! : data.groupBy === "customer" ? r.customer! : r.method!;
+      const g = new Map<string, { group: string; receipts: number; amount: number }>();
+      for (const r of detail) {
+        const k = key(r);
+        const cur = g.get(k) ?? { group: k, receipts: 0, amount: 0 };
+        cur.receipts += 1;
+        cur.amount = round2(cur.amount + r.amount);
+        g.set(k, cur);
+      }
+      const out = [...g.values()];
+      out.sort((a, b) =>
+        data.groupBy === "date" ? a.group.localeCompare(b.group) : b.amount - a.amount,
+      );
+      return toRows(out);
+    }),
+  );
+
 export const getExpenseReport = createServerFn({ method: "GET" })
   .validator(
-    z.object({ from: isoDate, to: isoDate, groupBy: z.enum(["date", "month", "head", "method"]) }),
+    z.object({
+      from: isoDate,
+      to: isoDate,
+      groupBy: z.enum(["detail", "date", "month", "head", "method"]),
+      headId: z.string().uuid().optional(),
+    }),
   )
   .handler(({ data }) =>
     safe(async () => {
       await reportUser("reports.view", "expenses.approve");
+      if (data.groupBy === "detail") {
+        const rows = await getDb().execute<Record<string, string>>(sql`
+        select d.id, d.date::text date, d.doc_no, h.name head, coalesce(d.extra->>'paidTo', '') paid_to,
+          d.narration, d.reference, d.method, d.total
+        from documents d join expense_heads h on h.id = d.expense_head_id
+        where d.type = 'EXP' and d.status = 'Approved' and d.date between ${data.from} and ${data.to}
+          ${data.headId ? sql`and d.expense_head_id = ${data.headId}` : sql``}
+        order by d.date, d.doc_no`);
+        return toRows(
+          rows.map((r) => ({
+            id: r["id"],
+            date: r["date"],
+            docNo: r["doc_no"],
+            head: r["head"],
+            paidTo: r["paid_to"],
+            narration: r["narration"],
+            reference: r["reference"],
+            method: r["method"],
+            amount: n(r["total"]),
+            group: r["head"],
+            vouchers: 1,
+          })),
+        );
+      }
       const key = {
         date: sql`d.date::text`,
         month: sql`to_char(d.date, 'YYYY-MM')`,
@@ -706,6 +879,7 @@ export const getExpenseReport = createServerFn({ method: "GET" })
       select ${key} grp, count(*) vouchers, sum(d.total) amount
       from documents d join expense_heads h on h.id = d.expense_head_id
       where d.type = 'EXP' and d.status = 'Approved' and d.date between ${data.from} and ${data.to}
+        ${data.headId ? sql`and d.expense_head_id = ${data.headId}` : sql``}
       group by grp order by ${data.groupBy === "date" || data.groupBy === "month" ? sql`grp` : sql`amount desc`}`);
       return toRows(
         rows.map((r) => ({

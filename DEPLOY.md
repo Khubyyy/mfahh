@@ -61,6 +61,24 @@ Optional: to allow only the office IP, uncomment the `remote_ip` lines in `Caddy
 5. **Nightly backup:** in Task Scheduler, create a daily task that runs `npm run backup` in the project folder. Copy the `backups` folder to a USB drive or cloud storage every week.
 6. On a LAN without HTTPS, browsers send cookies in clear text over the local network. If staff connect over Wi-Fi, put Caddy in front with an internal certificate, or use option A.
 
+## C. cPanel "Setup Node.js App" + managed Postgres (e.g. Supabase)
+
+Shared hosting cannot run Postgres as a superuser, so the database lives on a managed Postgres
+(Supabase, Neon…) in the region closest to the host, and cPanel only runs the prebuilt server.
+
+1. Build locally: `npm ci && npm run build`, then bundle the setup script:
+   `npx esbuild scripts/cpanel-setup.ts --bundle --platform=node --format=esm --outfile=tools/setup.mjs --alias:@tanstack/react-start/server=<stub>`
+   (the stub only needs to export `getCookie, setCookie, deleteCookie, getRequestHeader, getRequestIP`).
+2. Upload `.output/`, `migrations/`, `tools/`, an `app.cjs` startup file that loads `.env` and
+   imports `.output/server/index.mjs`, and `.env` with `ADMIN_DATABASE_URL` (the provider's admin
+   connection), `DATABASE_OWNER_URL`, `DB_APP_PASSWORD`, `DATABASE_URL` (as `mfahh_app`), `APP_URL`,
+   `SESSION_SECRET`, `BACKUP_PASSPHRASE`, `TRUST_PROXY=true`, `ADMIN_EMAIL`, `ADMIN_NAME`.
+3. Keep the app folder **outside** the public web folder of the domain.
+4. `node tools/setup.mjs` creates the `mfahh_app` role, runs migrations, removes Supabase's public
+   API access to the tables, seeds reference data and the first admin (log in `setup-log.txt`).
+   It is safe to re-run after every update to apply new migrations.
+5. The host must allow outbound TCP 5432 to the database.
+
 ---
 
 ## Security checklist before go-live

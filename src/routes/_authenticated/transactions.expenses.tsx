@@ -6,10 +6,24 @@ export const Route = createFileRoute("/_authenticated/transactions/expenses")({
   component: () => (
     <DocumentListPage
       title="Expenses"
-      section="Accounts"
+      section="Expenses"
       types={["EXP"]}
       create={["EXP"]}
-      columns={["docNo", "date", "head", "narration", "method", "total", "status", "createdBy"]}
+      columns={[
+        "docNo",
+        "date",
+        "head",
+        "paidTo",
+        "narration",
+        "billNo",
+        "method",
+        "total",
+        "status",
+      ]}
+      filters={[
+        { key: "expenseHead", label: "Expense heads" },
+        { key: "method", label: "Methods" },
+      ]}
     />
   ),
 });

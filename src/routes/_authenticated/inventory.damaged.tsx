@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { DocumentListPage } from "@/components/documents/DocumentListPage";
+import { DamagedRegister } from "@/components/inventory/DamagedRegister";
 
 export const Route = createFileRoute("/_authenticated/inventory/damaged")({
   head: () => ({ meta: [{ title: "Damaged & Obsolete Stock – MFAHH" }] }),
@@ -10,6 +11,7 @@ export const Route = createFileRoute("/_authenticated/inventory/damaged")({
       types={["DMG"]}
       create={["DMG"]}
       columns={["docNo", "date", "condition", "reason", "total", "status", "createdBy"]}
+      extraHeader={<DamagedRegister />}
     />
   ),
 });

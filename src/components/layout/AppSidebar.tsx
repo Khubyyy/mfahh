@@ -11,7 +11,10 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { canAny } = useSession();
   const { data: lookups } = useLookups();
   const [open, setOpen] = useState<string | null>(
-    () => navItems.find((n) => n.children && path.startsWith(n.path))?.title ?? null,
+    () =>
+      navItems
+        .filter((n) => n.children && path.startsWith(n.path))
+        .sort((a, b) => b.path.length - a.path.length)[0]?.title ?? null,
   );
   const click = onNavigate ? { onClick: onNavigate } : {};
 
@@ -33,7 +36,11 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void }) {
         {navItems
           .filter((item) => allowed(canAny, item.perms))
           .map((item) => {
-            const active = item.path === "/" ? path === "/" : path.startsWith(item.path);
+            // The most specific section wins (Expenses lives under /transactions too).
+            const best = navItems
+              .filter((n) => n.path !== "/" && path.startsWith(n.path))
+              .sort((a, b) => b.path.length - a.path.length)[0];
+            const active = item.path === "/" ? path === "/" : best?.title === item.title;
             const base = cn(
               "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition",
               active

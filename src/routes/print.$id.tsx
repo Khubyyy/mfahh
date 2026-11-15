@@ -1,14 +1,22 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { getAuthState } from "@/server/functions/auth";
 import { getDocument } from "@/server/functions/documents";
 import { getLookups } from "@/server/functions/masters";
 import { PrintShell } from "@/components/print/PrintShell";
+import {
+  InfoBox,
+  ItemsTable,
+  MethodRadios,
+  Signatures,
+  TotalsPanel,
+  type ItemCol,
+} from "@/components/print/Blocks";
 import { formatAmount, formatDate } from "@/lib/format";
 import { amountInWords } from "@/lib/words";
 import type { DocType } from "@/shared/documents";
 
-/** Printable invoice / voucher / slip. Opens the browser print dialog (use "Save as PDF" for a PDF). */
+/** Printable invoice / voucher / slip in the house blue-and-white design. "Save as PDF" gives a PDF. */
 export const Route = createFileRoute("/print/$id")({
   ssr: false,
   beforeLoad: async () => {
@@ -25,26 +33,32 @@ export const Route = createFileRoute("/print/$id")({
 
 type Row = Record<string, string | number | boolean | null>;
 const s = (r: Row, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
+const amt = (v: unknown) => formatAmount(Number(v ?? 0));
 
 const TITLES: Partial<Record<DocType, string>> = {
   SI: "Sales Invoice",
   SO: "Sales Order",
-  SR: "Credit Note (Sales Return)",
+  SR: "Sales Return Invoice",
   RV: "Receipt Voucher",
   PI: "Purchase Invoice",
-  PR: "Debit Note (Purchase Return)",
+  PR: "Supplier Return Invoice",
   PV: "Payment Voucher",
-  EXP: "Expense Payment Voucher",
+  EXP: "Voucher",
   JV: "Journal Voucher",
   SMP: "Sample Issue Slip",
   SMR: "Sample Return Note",
-  ADJ: "Stock Adjustment Note",
-  DMG: "Damaged Stock Write-off Note",
+  ADJ: "Stock Adjustment",
+  DMG: "Damaged Stock Note",
   OB: "Opening Balances",
   PAYROLL: "Salary Sheet",
-  SALPAY: "Salary Payment Voucher",
-  LOAN: "Staff Advance / Loan Voucher",
-  CLOSE: "Year-end Closing Entry",
+  SALPAY: "Salary Payment",
+  LOAN: "Staff Advance / Loan",
+  CLOSE: "Year-end Closing",
+};
+const SUBTITLES: Partial<Record<DocType, string>> = {
+  SR: "Credit note",
+  PR: "Debit note",
+  EXP: "Expense payment voucher",
 };
 
 function PrintDocument() {
@@ -52,229 +66,367 @@ function PrintDocument() {
   const d = detail.doc;
   const type = s(d, "type") as DocType;
   useEffect(() => {
-    const t = setTimeout(() => window.print(), 400);
+    const t = setTimeout(() => window.print(), 600);
     return () => clearTimeout(t);
   }, []);
-  const money = ["RV", "PV", "EXP", "SALPAY", "LOAN"].includes(type);
-  const priced = ["SI", "SO", "SR", "PI", "PR"].includes(type);
+
   const party =
     lookups.customers.find((c) => c.id === d["partyId"]) ??
     lookups.suppliers.find((c) => c.id === d["partyId"]) ??
     lookups.staff.find((c) => c.id === d["partyId"]);
+  const p = (party ?? {}) as {
+    name?: string;
+    code?: string;
+    phone?: string;
+    address?: string;
+    city?: string;
+    location?: string;
+  };
+  const origin = detail.related.find((r) => r["id"] === d["refDocId"]);
+  const signatures = (last: string) => [
+    { label: "Prepared By", name: s(d, "createdByName") },
+    { label: "Checked By" },
+    { label: "Approved By", name: s(d, "approvedByName") },
+    { label: last },
+  ];
+  const words = amountInWords(Number(d["total"]));
+
+  let body: ReactNode;
+  if (["SI", "SO", "SR", "PI", "PR"].includes(type)) {
+    const supplierSide = type === "PI" || type === "PR";
+    const returns = type === "SR" || type === "PR";
+    const cols: ItemCol[] = [
+      { header: "#", align: "center", width: "32px" },
+      { header: supplierSide && s(d, "kind") !== "Books" ? "Description" : "Book / Product" },
+      ...(type === "SR" ? [{ header: "Condition", width: "74px" }] : []),
+      { header: "Qty", align: "right", width: "52px" },
+      { header: "Rate", align: "right", width: "74px" },
+      { header: "Disc %", align: "right", width: "58px" },
+      { header: "Amount (PKR)", align: "right", width: "104px" },
+    ];
+    const rows = detail.lines.map((l, i) => [
+      i + 1,
+      l["productName"] ? (
+        <>
+          <span className="font-semibold">{s(l, "productName")}</span>
+          <span className="ml-1 text-[10px] text-gray-500">{s(l, "productCode")}</span>
+        </>
+      ) : (
+        `${s(l, "accountName")}${l["description"] ? `: ${s(l, "description")}` : ""}`
+      ),
+      ...(type === "SR" ? [s(l, "condition") || "Saleable"] : []),
+      s(l, "qty"),
+      amt(l["rate"]),
+      Number(l["discountPct"]) ? `${Number(l["discountPct"])}%` : "",
+      amt(l["amount"]),
+    ]);
+    const settled = Number(d["paidAmount"]) + Number(d["creditedAmount"]);
+    const gross = detail.lines.reduce((x, l) => x + Number(l["qty"]) * Number(l["rate"]), 0);
+    const discountTotal = gross - Number(d["subtotal"]) + Number(d["discount"]);
+    body = (
+      <>
+        <InfoBox
+          left={[
+            [type === "SO" ? "Order No" : returns ? "Return No" : "Invoice No", s(d, "docNo")],
+            ["Date", formatDate(s(d, "date"))],
+            ...(d["dueDate"] && !returns
+              ? ([["Due Date", formatDate(s(d, "dueDate"))]] as [string, ReactNode][])
+              : []),
+            ...(origin
+              ? ([
+                  [
+                    returns ? "Against Invoice" : type === "SO" ? "From Invoice" : "Against Order",
+                    `${s(origin, "docNo")} · ${formatDate(s(origin, "date"))}`,
+                  ],
+                ] as [string, ReactNode][])
+              : []),
+            [supplierSide && !returns ? "Supplier Inv. No" : "Reference", s(d, "reference")],
+          ]}
+          right={[
+            [supplierSide ? "Supplier" : "Customer", p.name ?? ""],
+            ["Code", p.code ?? ""],
+            ["Phone", p.phone ?? ""],
+            [
+              "Address",
+              [p.address, p.city && !(p.address ?? "").includes(p.city) ? p.city : ""]
+                .filter(Boolean)
+                .join(", "),
+            ],
+            ...(returns && d["reason"]
+              ? ([["Reason", s(d, "reason")]] as [string, ReactNode][])
+              : []),
+          ]}
+        />
+        <ItemsTable cols={cols} rows={rows} minRows={6} />
+        <TotalsPanel
+          remarks={s(d, "narration")}
+          words={words}
+          totals={[
+            ["Gross Amount", amt(gross)],
+            ...(discountTotal > 0.004
+              ? ([["Discount", `(${amt(discountTotal)})`]] as [string, string][])
+              : []),
+            ...(Number(d["taxAmount"]) > 0
+              ? ([[`Sales Tax ${s(d, "taxPct")}%`, amt(d["taxAmount"])]] as [string, string][])
+              : []),
+            ["Total Amount", amt(d["total"]), true],
+            ...((type === "SI" || type === "PI") && settled > 0
+              ? ([["Balance Due", amt(d["outstanding"])]] as [string, string][])
+              : []),
+          ]}
+        />
+        <Signatures
+          boxes={signatures(
+            supplierSide
+              ? returns
+                ? "Supplier Signature"
+                : "Received in Store"
+              : "Customer Signature",
+          )}
+        />
+      </>
+    );
+  } else if (type === "EXP") {
+    const items = detail.lines.length
+      ? detail.lines.map((l, i) => [i + 1, s(l, "description"), amt(l["amount"])])
+      : [[1, s(d, "narration"), amt(d["total"])]];
+    body = (
+      <>
+        <InfoBox
+          left={[
+            ["Voucher No", s(d, "docNo")],
+            ["Date", formatDate(s(d, "date"))],
+            ["Expense Head", s(d, "expenseHead")],
+            ["Bill / Inv. No", s(d, "reference")],
+          ]}
+          right={[
+            ["Paid To", s(d, "paidTo")],
+            ["Department", s(d, "department")],
+            ["Payment Method", <MethodRadios key="m" value={s(d, "method")} />],
+            [
+              "Paid From",
+              s(d, "method") === "Cash"
+                ? "Cash in hand"
+                : `${s(d, "bankName")}${d["chequeNo"] ? ` · Chq # ${s(d, "chequeNo")}` : ""}`,
+            ],
+          ]}
+        />
+        <ItemsTable
+          cols={[
+            { header: "#", align: "center", width: "40px" },
+            { header: "Description", align: "center" },
+            { header: "Amount (PKR)", align: "right", width: "150px" },
+          ]}
+          rows={items}
+          minRows={5}
+        />
+        <TotalsPanel
+          remarks={detail.lines.length ? s(d, "narration") : ""}
+          totals={[["Total Amount", amt(d["total"]), true]]}
+          words={words}
+        />
+        <Signatures boxes={signatures("Received By")} />
+      </>
+    );
+  } else if (["RV", "PV", "SALPAY", "LOAN"].includes(type)) {
+    const incoming = type === "RV";
+    const method = s(d, "method");
+    const how =
+      method === "Cheque"
+        ? `Cheque${d["chequeNo"] ? ` # ${s(d, "chequeNo")}` : ""}`
+        : method === "Online"
+          ? "Online transfer"
+          : method === "Bank"
+            ? "Bank deposit"
+            : "Cash";
+    const allocs = detail.allocations.filter((a) => a["direction"] === "allocated to");
+    const rows: ReactNode[][] =
+      type === "SALPAY"
+        ? detail.lines.map((l, i) => [i + 1, `Salary: ${s(l, "partyName")}`, amt(l["amount"])])
+        : allocs.length
+          ? [
+              ...allocs.map((a, i) => [
+                i + 1,
+                `${how} ${incoming ? "received" : "paid"} against ${s(a, "docNo")} dated ${formatDate(s(a, "date"))}`,
+                amt(a["amount"]),
+              ]),
+              ...(Number(d["total"]) - allocs.reduce((x, a) => x + Number(a["amount"]), 0) > 0.004
+                ? [
+                    [
+                      allocs.length + 1,
+                      `${how} ${incoming ? "received" : "paid"} on account`,
+                      amt(Number(d["total"]) - allocs.reduce((x, a) => x + Number(a["amount"]), 0)),
+                    ],
+                  ]
+                : []),
+            ]
+          : [
+              [
+                1,
+                type === "LOAN"
+                  ? `${s(d, "loanType") || "Advance"} to staff`
+                  : `${how} ${incoming ? "received" : "paid"}`,
+                amt(d["total"]),
+              ],
+            ];
+    body = (
+      <>
+        <InfoBox
+          left={[
+            [incoming ? "Receipt No" : "Voucher No", s(d, "docNo")],
+            ["Date", formatDate(s(d, "date"))],
+            ["Reference", s(d, "reference")],
+          ]}
+          right={[
+            [incoming ? "Received From" : "Paid To", p.name ?? ""],
+            [incoming ? "Received Via" : "Payment Method", <MethodRadios key="m" value={method} />],
+            [
+              incoming ? "Received Into" : "Paid From",
+              method === "Cash"
+                ? "Cash in hand"
+                : `${s(d, "bankName")}${d["chequeNo"] ? ` · Chq # ${s(d, "chequeNo")}` : ""}`,
+            ],
+          ]}
+        />
+        <ItemsTable
+          cols={[
+            { header: "#", align: "center", width: "40px" },
+            { header: "Description" },
+            { header: "Amount (PKR)", align: "right", width: "150px" },
+          ]}
+          rows={rows}
+          minRows={4}
+        />
+        <TotalsPanel
+          remarks={s(d, "narration")}
+          totals={[["Total Amount", amt(d["total"]), true]]}
+          words={words}
+        />
+        <Signatures boxes={signatures(incoming ? "Paid By (Customer)" : "Received By")} />
+      </>
+    );
+  } else {
+    body = <GenericBody type={type} d={d} lines={detail.lines} partyName={p.name} />;
+  }
 
   return (
     <PrintShell
       company={lookups.company}
       title={TITLES[type] ?? s(d, "typeLabel")}
+      sub={SUBTITLES[type]}
       status={s(d, "status")}
     >
-      <div className="mb-4 grid grid-cols-2 gap-4 text-sm">
-        <div>
-          {party && (
-            <>
-              <p className="text-xs uppercase text-gray-500">
-                {type.startsWith("P") && type !== "PAYROLL"
-                  ? "Supplier"
-                  : type === "LOAN"
-                    ? "Employee"
-                    : "Customer"}
-              </p>
-              <p className="font-semibold">{party.name}</p>
-              <p>{party.code}</p>
-            </>
-          )}
-          {d["issuedTo"] && (
-            <p>
-              Issued to: <b>{s(d, "issuedTo")}</b> · Purpose: {s(d, "purpose")}
-            </p>
-          )}
-          {d["expenseHead"] && (
-            <p>
-              Expense head: <b>{s(d, "expenseHead")}</b>
-            </p>
-          )}
-        </div>
-        <div className="text-right">
-          <p>
-            No: <b>{s(d, "docNo")}</b>
-          </p>
-          <p>Date: {formatDate(s(d, "date"))}</p>
-          {d["dueDate"] && <p>Due: {formatDate(s(d, "dueDate"))}</p>}
-          {d["reference"] && <p>Ref: {s(d, "reference")}</p>}
-          {d["method"] && (
-            <p>
-              {s(d, "method")}
-              {d["bankName"] ? ` · ${s(d, "bankName")}` : ""}
-              {d["chequeNo"] ? ` · Chq # ${s(d, "chequeNo")}` : ""}
-            </p>
-          )}
-          {d["month"] && <p>Month: {s(d, "month")}</p>}
-        </div>
-      </div>
-
-      {detail.lines.length > 0 && (
-        <table className="w-full border-collapse text-sm">
-          <thead>
-            <tr className="border-y-2 border-gray-800 text-left">
-              <th className="py-1">#</th>
-              <th>
-                {type === "JV" || type === "OB"
-                  ? "Account"
-                  : type === "PAYROLL" || type === "SALPAY"
-                    ? "Employee"
-                    : "Description"}
-              </th>
-              {type === "PAYROLL" ? (
-                <>
-                  <th className="text-right">Gross</th>
-                  <th className="text-right">Deductions</th>
-                  <th className="text-right">Recovery</th>
-                  <th className="text-right">Net</th>
-                </>
-              ) : type === "JV" || type === "OB" ? (
-                <>
-                  <th className="text-right">Debit</th>
-                  <th className="text-right">Credit</th>
-                </>
-              ) : type === "SALPAY" ? (
-                <th className="text-right">Amount</th>
-              ) : (
-                <>
-                  <th className="text-right">Qty</th>
-                  {priced && (
-                    <>
-                      <th className="text-right">Rate</th>
-                      <th className="text-right">Disc %</th>
-                      <th className="text-right">Amount</th>
-                    </>
-                  )}
-                </>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {detail.lines.map((l, i) => (
-              <tr key={i} className="border-b border-gray-300">
-                <td className="py-1">{i + 1}</td>
-                <td>
-                  {l["productName"]
-                    ? `${s(l, "productCode")} · ${s(l, "productName")}`
-                    : l["partyName"]
-                      ? s(l, "partyName")
-                      : `${s(l, "accountCode")} ${s(l, "accountName")}`}
-                  {l["description"] ? ` — ${s(l, "description")}` : ""}
-                </td>
-                {type === "PAYROLL" ? (
-                  <>
-                    <td className="text-right">
-                      {formatAmount(Number(l["basic"]) + Number(l["allowances"]))}
-                    </td>
-                    <td className="text-right">{formatAmount(Number(l["deductions"]), true)}</td>
-                    <td className="text-right">{formatAmount(Number(l["recovery"]), true)}</td>
-                    <td className="text-right">{formatAmount(Number(l["amount"]))}</td>
-                  </>
-                ) : type === "JV" || type === "OB" ? (
-                  <>
-                    <td className="text-right">
-                      {formatAmount(
-                        l["productId"] ? Number(l["amount"]) : Number(l["debit"]),
-                        true,
-                      )}
-                    </td>
-                    <td className="text-right">{formatAmount(Number(l["credit"]), true)}</td>
-                  </>
-                ) : type === "SALPAY" ? (
-                  <td className="text-right">{formatAmount(Number(l["amount"]))}</td>
-                ) : (
-                  <>
-                    <td className="text-right">{s(l, "qty")}</td>
-                    {priced && (
-                      <>
-                        <td className="text-right">{formatAmount(Number(l["rate"]))}</td>
-                        <td className="text-right">{Number(l["discountPct"]) || ""}</td>
-                        <td className="text-right">{formatAmount(Number(l["amount"]))}</td>
-                      </>
-                    )}
-                  </>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <div className="mt-3 ml-auto w-72 space-y-0.5 text-sm">
-        {priced && (
-          <>
-            <div className="flex justify-between">
-              <span>Subtotal</span>
-              <span>{formatAmount(Number(d["subtotal"]))}</span>
-            </div>
-            {Number(d["discount"]) > 0 && (
-              <div className="flex justify-between">
-                <span>Discount</span>
-                <span>({formatAmount(Number(d["discount"]))})</span>
-              </div>
-            )}
-            {Number(d["taxAmount"]) > 0 && (
-              <div className="flex justify-between">
-                <span>Sales tax {s(d, "taxPct")}%</span>
-                <span>{formatAmount(Number(d["taxAmount"]))}</span>
-              </div>
-            )}
-          </>
-        )}
-        <div className="flex justify-between border-t-2 border-gray-800 pt-1 text-base font-bold">
-          <span>{type === "SMP" || type === "SMR" ? "Value at cost" : "Total"}</span>
-          <span>Rs {formatAmount(Number(d["total"]))}</span>
-        </div>
-        {type === "SI" && Number(d["paidAmount"]) + Number(d["creditedAmount"]) > 0 && (
-          <div className="flex justify-between">
-            <span>Balance due</span>
-            <span>Rs {formatAmount(Number(d["outstanding"]))}</span>
-          </div>
-        )}
-      </div>
-      {(money || priced || type === "PAYROLL") && (
-        <p className="mt-3 text-sm">
-          <b>Amount in words:</b> {amountInWords(Number(d["total"]))}
-        </p>
-      )}
-      {d["narration"] && (
-        <p className="mt-2 text-sm">
-          <b>Remarks:</b> {s(d, "narration")}
-        </p>
-      )}
-      {detail.allocations.length > 0 && money && (
-        <p className="mt-2 text-sm">
-          <b>Against:</b>{" "}
-          {detail.allocations
-            .map((a) => `${s(a, "docNo")} (Rs ${formatAmount(Number(a["amount"]))})`)
-            .join(", ")}
-        </p>
-      )}
-
-      <div className="mt-16 grid grid-cols-3 gap-8 text-center text-xs">
-        <div className="border-t border-gray-600 pt-1">
-          Prepared by
-          <br />
-          {s(d, "createdByName")}
-        </div>
-        <div className="border-t border-gray-600 pt-1">
-          Approved by
-          <br />
-          {s(d, "approvedByName")}
-        </div>
-        <div className="border-t border-gray-600 pt-1">
-          {money
-            ? "Received by"
-            : type === "PI" || type === "PR"
-              ? "Received / checked in store"
-              : priced
-                ? "Customer signature & stamp"
-                : "Checked by"}
-        </div>
-      </div>
+      {body}
     </PrintShell>
+  );
+}
+
+/** Journals, stock notes, samples and payroll: same theme, type-specific columns. */
+function GenericBody({
+  type,
+  d,
+  lines,
+  partyName,
+}: {
+  type: DocType;
+  d: Row;
+  lines: Row[];
+  partyName?: string;
+}) {
+  const accounts = type === "JV" || type === "OB" || type === "CLOSE";
+  const stock = ["ADJ", "DMG", "SMP", "SMR"].includes(type);
+  const cols: ItemCol[] = [
+    { header: "#", align: "center", width: "32px" },
+    { header: accounts ? "Account / item" : type === "PAYROLL" ? "Employee" : "Book / Product" },
+    ...(type === "PAYROLL"
+      ? [
+          { header: "Gross", align: "right" as const },
+          { header: "Deductions", align: "right" as const },
+          { header: "Recovery", align: "right" as const },
+          { header: "Net", align: "right" as const },
+        ]
+      : accounts
+        ? [
+            { header: "Debit", align: "right" as const, width: "110px" },
+            { header: "Credit", align: "right" as const, width: "110px" },
+          ]
+        : [
+            { header: "Qty", align: "right" as const, width: "70px" },
+            ...(stock ? [{ header: "Unit cost", align: "right" as const, width: "90px" }] : []),
+            { header: "Value", align: "right" as const, width: "110px" },
+          ]),
+  ];
+  const rows = lines.map((l, i) => {
+    const name = l["productName"]
+      ? `${s(l, "productName")} (${s(l, "productCode")})`
+      : l["partyName"]
+        ? s(l, "partyName")
+        : `${s(l, "accountCode")} ${s(l, "accountName")}`;
+    const label = `${name}${l["description"] ? ` — ${s(l, "description")}` : ""}`;
+    if (type === "PAYROLL")
+      return [
+        i + 1,
+        label,
+        amt(Number(l["basic"]) + Number(l["allowances"])),
+        amt(l["deductions"]),
+        amt(l["recovery"]),
+        amt(l["amount"]),
+      ];
+    if (accounts)
+      return [
+        i + 1,
+        label,
+        Number(l["productId"] ? l["amount"] : l["debit"])
+          ? amt(l["productId"] ? l["amount"] : l["debit"])
+          : "",
+        Number(l["credit"]) ? amt(l["credit"]) : "",
+      ];
+    const unit = Number(l["unitCost"] ?? l["rate"] ?? 0);
+    return [
+      i + 1,
+      label,
+      s(l, "qty"),
+      ...(stock ? [amt(unit)] : []),
+      amt(Math.abs(Number(l["qty"])) * unit || Number(l["amount"])),
+    ];
+  });
+  return (
+    <>
+      <InfoBox
+        left={[
+          ["Document No", s(d, "docNo")],
+          ["Date", formatDate(s(d, "date"))],
+          ["Reference", s(d, "reference") || s(d, "month")],
+        ]}
+        right={[
+          ...(partyName ? ([["Party", partyName]] as [string, ReactNode][]) : []),
+          ...(d["issuedTo"]
+            ? ([["Issued To", `${s(d, "issuedTo")} · ${s(d, "purpose")}`]] as [string, ReactNode][])
+            : []),
+          ...(d["condition"] ? ([["Condition", s(d, "condition")]] as [string, ReactNode][]) : []),
+          ...(d["reason"] ? ([["Reason", s(d, "reason")]] as [string, ReactNode][]) : []),
+        ]}
+      />
+      <ItemsTable cols={cols} rows={rows} minRows={4} />
+      <TotalsPanel
+        remarks={s(d, "narration")}
+        totals={[
+          [
+            type === "SMP" || type === "SMR" || stock ? "Value at Cost" : "Total Amount",
+            amt(d["total"]),
+            true,
+          ],
+        ]}
+        words={type === "PAYROLL" || accounts ? amountInWords(Number(d["total"])) : undefined}
+      />
+      <Signatures
+        boxes={[
+          { label: "Prepared By", name: s(d, "createdByName") },
+          { label: "Checked By" },
+          { label: "Approved By", name: s(d, "approvedByName") },
+          { label: stock ? "Store Keeper" : "Received By" },
+        ]}
+      />
+    </>
   );
 }

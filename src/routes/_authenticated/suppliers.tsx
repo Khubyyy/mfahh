@@ -4,7 +4,7 @@ import { partyFields } from "@/components/masters/partyFields";
 import { PartyStatement } from "@/components/reports/Ledger";
 import { DocumentListInline } from "@/components/documents/DocumentListInline";
 import { formatPKR } from "@/lib/format";
-import { SUPPLIER_CATEGORIES } from "@/shared/masters";
+import { ManageCategoriesButton } from "@/components/masters/CategoryManager";
 
 export const Route = createFileRoute("/_authenticated/suppliers")({
   head: () => ({ meta: [{ title: "Suppliers & Vendors – MFAHH" }] }),
@@ -20,8 +20,8 @@ export const Route = createFileRoute("/_authenticated/suppliers")({
         {
           key: "category",
           label: "Category",
-          type: "select",
-          options: SUPPLIER_CATEGORIES,
+          type: "category",
+          categoryKind: "supplier",
           required: true,
         },
         { key: "notes", label: "Payment terms / notes", type: "textarea" },
@@ -38,6 +38,7 @@ export const Route = createFileRoute("/_authenticated/suppliers")({
         { key: "status", header: "Status", kind: "status" },
       ]}
       filters={[{ key: "category", label: "Categories" }]}
+      headerActions={<ManageCategoriesButton kinds={["supplier"]} />}
       kpis={(rows) => {
         const bal = rows.reduce((s, r) => s + Number(r["balance"] ?? 0), 0);
         const od = rows.reduce((s, r) => s + Number(r["overdue"] ?? 0), 0);

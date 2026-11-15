@@ -1,14 +1,19 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { and, asc, eq, ne, sql } from "drizzle-orm";
-import { getDb } from "../db/client";
+import { getDb, type Tx } from "../db/client";
 import * as t from "../db/schema";
 import { diff, writeAudit } from "../audit";
 import { assertPerm, requireUser, type SessionUser } from "../security/session";
 import { safe, toRows, type Row } from "./_safe";
 import type { Permission } from "@/shared/permissions";
 import { todayISO } from "@/shared/documents";
-import { CUSTOMER_CATEGORIES, PRODUCT_CATEGORIES, SUPPLIER_CATEGORIES } from "@/shared/masters";
+import {
+  CATEGORY_KINDS,
+  CATEGORY_KIND_KEYS,
+  CODE_PREFIX,
+  type CategoryKind,
+} from "@/shared/masters";
 
 const str = (max = 200) => z.string().trim().max(max).default("");
 const req = (label: string, max = 200) => z.string().trim().min(1, `${label} is required`).max(max);
@@ -21,8 +26,11 @@ const isoDate = z
   .or(z.literal("").transform(() => null));
 const email = z.string().trim().max(200).email("Invalid email").or(z.literal("")).default("");
 
+/** Blank on a new record = generate the next code automatically. */
+const autoCode = (max: number) => z.string().trim().max(max).default("");
+
 const partyFields = {
-  code: req("Code", 30),
+  code: autoCode(30),
   name: req("Name"),
   contactPerson: str(),
   phone: str(50),
@@ -41,28 +49,35 @@ const ENTITIES = {
     label: "Customer",
     schema: z.object({
       ...partyFields,
-      category: z.enum(CUSTOMER_CATEGORIES),
+      category: req("Customer type", 60),
+      location: req("Location", 60),
       creditLimit: amount,
+      discountPct: z.coerce
+        .number()
+        .finite()
+        .min(0, "Discount cannot be negative")
+        .max(100, "Discount cannot exceed 100%")
+        .default(0),
     }),
   },
   suppliers: {
     table: t.suppliers,
     perm: "suppliers.manage",
     label: "Supplier",
-    schema: z.object({ ...partyFields, category: z.enum(SUPPLIER_CATEGORIES) }),
+    schema: z.object({ ...partyFields, category: req("Category", 60) }),
   },
   products: {
     table: t.products,
     perm: "books.manage",
     label: "Book / Product",
     schema: z.object({
-      code: req("Code", 40),
+      code: autoCode(40),
       name: req("Name"),
       subject: str(100),
       className: str(50),
       series: str(100),
       edition: str(50),
-      category: z.enum(PRODUCT_CATEGORIES),
+      category: req("Category", 60),
       costPrice: amount,
       salePrice: amount,
       minStock: z.coerce.number().int().min(0).max(1e7).default(0),
@@ -104,7 +119,7 @@ const ENTITIES = {
     perm: "staff.manage",
     label: "Staff Member",
     schema: z.object({
-      empId: req("Employee ID", 30),
+      empId: autoCode(30),
       name: req("Name"),
       type: z.enum(["Employee", "Management"]),
       department: str(100),
@@ -176,7 +191,15 @@ async function listRaw(entity: MasterEntity): Promise<object[]> {
           group by party_id`);
       const b = new Map(bal.map((r) => [r.party_id, Number(r.bal) * (isCust ? 1 : -1)]));
       const o = new Map(overdue.map((r) => [r.party_id, Number(r.amt)]));
-      return rows.map((r) => ({ ...r, balance: b.get(r.id) ?? 0, overdue: o.get(r.id) ?? 0 }));
+      // Unallocated payments still reduce what is overdue, so overdue never exceeds the balance.
+      return rows.map((r) => {
+        const balance = b.get(r.id) ?? 0;
+        return {
+          ...r,
+          balance,
+          overdue: Math.max(0, Math.min(o.get(r.id) ?? 0, balance)),
+        };
+      });
     }
     case "products": {
       const rows = await db.select().from(t.products).orderBy(asc(t.products.code));
@@ -260,6 +283,44 @@ export const saveMaster = createServerFn({ method: "POST" })
               Record<string, unknown> | undefined)
           : undefined;
         if (data.id && !existing) throw new Error("Record not found.");
+
+        // Category fields must name an active category of the right kind (or keep the current one).
+        const catFields: [string, CategoryKind][] =
+          data.entity === "customers"
+            ? [
+                ["category", "customer"],
+                ["location", "customerLocation"],
+              ]
+            : data.entity === "suppliers"
+              ? [["category", "supplier"]]
+              : data.entity === "products"
+                ? [["category", "product"]]
+                : [];
+        for (const [field, kind] of catFields) {
+          const name = String(values[field] ?? "");
+          if (existing && String(existing[field] ?? "") === name) continue;
+          const [cat] = await tx
+            .select()
+            .from(t.categories)
+            .where(
+              and(eq(t.categories.kind, kind), sql`lower(${t.categories.name}) = lower(${name})`),
+            );
+          if (!cat || cat.status !== "Active")
+            throw new Error(
+              `"${name}" is not an active ${CATEGORY_KINDS[kind].singular.toLowerCase()}.`,
+            );
+          values[field] = cat.name;
+        }
+
+        if (data.entity === "customers" && !String(values["city"] ?? "").trim())
+          values["city"] = String(values["location"]).toLowerCase() === "karachi" ? "Karachi" : "";
+
+        // Codes are generated automatically when left blank on a new record.
+        const codeField = data.entity === "staff" ? "empId" : "code";
+        if (data.entity in CODE_PREFIX && !String(values[codeField] ?? "")) {
+          if (existing) values[codeField] = existing[codeField];
+          else values[codeField] = await nextCode(tx, data.entity as keyof typeof CODE_PREFIX);
+        }
 
         // Case-insensitive uniqueness on the business key.
         const keyField =
@@ -389,6 +450,34 @@ export const saveMaster = createServerFn({ method: "POST" })
     }),
   );
 
+type CodeEntity = keyof typeof CODE_PREFIX;
+const CODE_TABLES = {
+  customers: t.customers,
+  suppliers: t.suppliers,
+  products: t.products,
+  staff: t.staff,
+} as const;
+
+/** Next free code for a master (CUST-0001...). Skips codes already taken by imported records. */
+async function nextCode(tx: Tx, entity: CodeEntity) {
+  const prefix = CODE_PREFIX[entity];
+  const table = CODE_TABLES[entity];
+  const col = entity === "staff" ? t.staff.empId : (table as typeof t.customers).code;
+  for (let i = 0; i < 100000; i++) {
+    const [r] = await tx.execute<{ n: number }>(sql`
+      insert into code_series (prefix, next) values (${prefix}, 2)
+      on conflict (prefix) do update set next = code_series.next + 1
+      returning next - 1 as n`);
+    const code = `${prefix}-${String(Number(r?.n ?? 1)).padStart(4, "0")}`;
+    const taken = await tx
+      .select({ id: table.id })
+      .from(table)
+      .where(sql`lower(${col}) = lower(${code})`);
+    if (!taken.length) return code;
+  }
+  throw new Error("Could not generate a free code.");
+}
+
 /** Masters are never deleted: they are made Inactive and kept with their history. */
 export const setMasterStatus = createServerFn({ method: "POST" })
   .validator(z.object({ entity: entityEnum, id: z.string().uuid(), active: z.boolean() }))
@@ -455,6 +544,12 @@ export const getLookups = createServerFn({ method: "GET" }).handler(() =>
               code: t.customers.code,
               name: t.customers.name,
               creditDays: t.customers.creditDays,
+              discountPct: t.customers.discountPct,
+              phone: t.customers.phone,
+              city: t.customers.city,
+              location: t.customers.location,
+              category: t.customers.category,
+              address: t.customers.address,
               status: t.customers.status,
             })
             .from(t.customers)
@@ -467,6 +562,9 @@ export const getLookups = createServerFn({ method: "GET" }).handler(() =>
               code: t.suppliers.code,
               name: t.suppliers.name,
               creditDays: t.suppliers.creditDays,
+              phone: t.suppliers.phone,
+              city: t.suppliers.city,
+              address: t.suppliers.address,
               status: t.suppliers.status,
             })
             .from(t.suppliers)
@@ -510,6 +608,15 @@ export const getLookups = createServerFn({ method: "GET" }).handler(() =>
         })
         .from(t.bankAccounts)
         .orderBy(asc(t.bankAccounts.name)),
+      categories: await db
+        .select({
+          id: t.categories.id,
+          kind: t.categories.kind,
+          name: t.categories.name,
+          status: t.categories.status,
+        })
+        .from(t.categories)
+        .orderBy(asc(t.categories.sortOrder), asc(t.categories.name)),
       expenseHeads: await db
         .select({ id: t.expenseHeads.id, name: t.expenseHeads.name, status: t.expenseHeads.status })
         .from(t.expenseHeads)
@@ -571,5 +678,185 @@ export const getPriceHistory = createServerFn({ method: "GET" })
         .where(eq(t.priceHistory.productId, data.productId))
         .orderBy(asc(t.priceHistory.at));
       return toRows(rows);
+    }),
+  );
+
+/* ------------------------------------------------------------ categories */
+
+const kindEnum = z.enum(CATEGORY_KIND_KEYS as [CategoryKind, ...CategoryKind[]]);
+/** Where each category kind is used: table and column. */
+const CATEGORY_USE = {
+  product: { table: t.products, col: t.products.category },
+  customer: { table: t.customers, col: t.customers.category },
+  customerLocation: { table: t.customers, col: t.customers.location },
+  supplier: { table: t.suppliers, col: t.suppliers.category },
+} as const;
+
+/** All categories with how many records use each one. */
+export const listCategories = createServerFn({ method: "GET" })
+  .validator(z.object({ kind: kindEnum }))
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await requireUser();
+      assertPerm(user, CATEGORY_KINDS[data.kind].perm, "reports.view");
+      const db = getDb();
+      const use = CATEGORY_USE[data.kind];
+      const counts = await db
+        .select({ name: sql<string>`lower(${use.col})`, n: sql<number>`count(*)::int` })
+        .from(use.table)
+        .groupBy(sql`lower(${use.col})`);
+      const used = new Map(counts.map((c) => [c.name, c.n]));
+      const rows = await db
+        .select()
+        .from(t.categories)
+        .where(eq(t.categories.kind, data.kind))
+        .orderBy(asc(t.categories.sortOrder), asc(t.categories.name));
+      return toRows(
+        rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          status: r.status,
+          sortOrder: r.sortOrder,
+          used: used.get(r.name.toLowerCase()) ?? 0,
+        })),
+      );
+    }),
+  );
+
+/** Adds a category, or renames one (records using the old name follow the new name). */
+export const saveCategory = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      kind: kindEnum,
+      id: z.string().uuid().nullish(),
+      name: z.string().trim().min(1, "Enter a name").max(60),
+      sortOrder: z.coerce.number().int().min(0).max(9999).optional(),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await requireUser();
+      assertPerm(user, CATEGORY_KINDS[data.kind].perm);
+      return getDb().transaction(async (tx) => {
+        const dup = await tx
+          .select({ id: t.categories.id })
+          .from(t.categories)
+          .where(
+            and(
+              eq(t.categories.kind, data.kind),
+              sql`lower(${t.categories.name}) = lower(${data.name})`,
+              data.id ? ne(t.categories.id, data.id) : sql`true`,
+            ),
+          );
+        if (dup.length) throw new Error(`"${data.name}" already exists.`);
+        const label = CATEGORY_KINDS[data.kind].singular;
+        if (!data.id) {
+          const [row] = await tx
+            .insert(t.categories)
+            .values({
+              kind: data.kind,
+              name: data.name,
+              sortOrder: data.sortOrder ?? 50,
+              createdBy: user.id,
+            })
+            .returning();
+          await writeAudit(tx, user, {
+            action: "Created",
+            entity: label,
+            entityId: row!.id,
+            ref: data.name,
+          });
+          return { id: row!.id };
+        }
+        const [old] = await tx
+          .select()
+          .from(t.categories)
+          .where(and(eq(t.categories.id, data.id), eq(t.categories.kind, data.kind)))
+          .for("update");
+        if (!old) throw new Error("Category not found.");
+        await tx
+          .update(t.categories)
+          .set({
+            name: data.name,
+            sortOrder: data.sortOrder ?? old.sortOrder,
+            editedBy: user.id,
+            editedAt: new Date(),
+          })
+          .where(eq(t.categories.id, data.id));
+        let moved = 0;
+        if (old.name !== data.name) {
+          const use = CATEGORY_USE[data.kind];
+          const res = await tx
+            .update(use.table)
+            .set({
+              [data.kind === "customerLocation" ? "location" : "category"]: data.name,
+            } as never)
+            .where(sql`lower(${use.col}) = lower(${old.name})`)
+            .returning({ id: use.table.id });
+          moved = res.length;
+        }
+        await writeAudit(tx, user, {
+          action: "Edited",
+          entity: label,
+          entityId: data.id,
+          ref: data.name,
+          details: { from: old.name, to: data.name, recordsUpdated: moved },
+        });
+        return { id: data.id, recordsUpdated: moved };
+      });
+    }),
+  );
+
+/** Unused categories are deleted; categories in use can only be deactivated (hidden from new entries). */
+export const removeCategory = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      kind: kindEnum,
+      id: z.string().uuid(),
+      action: z.enum(["delete", "deactivate", "activate"]),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await requireUser();
+      assertPerm(user, CATEGORY_KINDS[data.kind].perm);
+      return getDb().transaction(async (tx) => {
+        const [cat] = await tx
+          .select()
+          .from(t.categories)
+          .where(and(eq(t.categories.id, data.id), eq(t.categories.kind, data.kind)))
+          .for("update");
+        if (!cat) throw new Error("Category not found.");
+        const label = CATEGORY_KINDS[data.kind].singular;
+        if (data.action === "delete") {
+          const use = CATEGORY_USE[data.kind];
+          const [u] = await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(use.table)
+            .where(sql`lower(${use.col}) = lower(${cat.name})`);
+          if ((u?.n ?? 0) > 0)
+            throw new Error(
+              `"${cat.name}" is used by ${u!.n} record(s). Deactivate it instead, or rename it.`,
+            );
+          await tx.delete(t.categories).where(eq(t.categories.id, data.id));
+        } else {
+          await tx
+            .update(t.categories)
+            .set({ status: data.action === "activate" ? "Active" : "Inactive" })
+            .where(eq(t.categories.id, data.id));
+        }
+        await writeAudit(tx, user, {
+          action:
+            data.action === "delete"
+              ? "Deleted"
+              : data.action === "activate"
+                ? "Activated"
+                : "Deactivated",
+          entity: label,
+          entityId: data.id,
+          ref: cat.name,
+        });
+        return { ok: true };
+      });
     }),
   );

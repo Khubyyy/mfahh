@@ -48,7 +48,7 @@ async function main() {
     await step("admin creates customer and book", async () => {
       await admin.goto(`${BASE}/customers`);
       await admin.getByRole("button", { name: "New Customer" }).click();
-      await admin.getByLabel("Code *").fill(`C-${run}`);
+      await admin.getByLabel("Customer code").fill(`C-${run}`);
       await admin.getByLabel("Name *").fill(CUSTOMER);
       await admin.getByLabel("Credit period (days)").fill("30");
       await admin.getByRole("dialog").getByRole("button", { name: "Save" }).click();
@@ -56,7 +56,7 @@ async function main() {
 
       await admin.goto(`${BASE}/inventory/books`);
       await admin.getByRole("button", { name: "New Book / Product" }).click();
-      await admin.getByLabel("Book code / SKU *").fill(`B-${run}`);
+      await admin.getByLabel("Book code / SKU").fill(`B-${run}`);
       await admin.getByLabel("Title *").fill(BOOK);
       await admin.getByLabel("Class / grade").fill("5");
       await admin.getByLabel("Standard cost price (Rs)").fill("50");
@@ -128,7 +128,7 @@ async function main() {
       const dlg = admin.getByRole("dialog");
       await pickSearch(admin, dlg.getByLabel("Party"), CUSTOMER);
       await dlg.getByLabel("Amount (Rs) *").fill("900");
-      await pickSelect(admin, "Paid through", "Cash");
+      await pickSelect(admin, "Received by", "Cash");
       await dlg.getByRole("button", { name: "Oldest first" }).click();
       await dlg.getByRole("button", { name: "Save draft" }).click();
       await expectToast(admin, /saved as draft/);

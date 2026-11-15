@@ -9,6 +9,7 @@ import {
   BarChart3,
   Settings,
   UserCog,
+  Receipt,
   type LucideIcon,
 } from "lucide-react";
 import type { Permission } from "@/shared/permissions";
@@ -47,7 +48,7 @@ export const navItems: NavItem[] = [
     perms: ["purchases.create", "purchases.approve"],
     children: [
       { title: "Invoices", path: "/purchases/invoices" },
-      { title: "Returns", path: "/purchases/returns" },
+      { title: "Supplier Returns", path: "/purchases/returns" },
       { title: "Payments", path: "/purchases/payments" },
     ],
   },
@@ -99,22 +100,29 @@ export const navItems: NavItem[] = [
     perms: ["suppliers.manage", "reports.view"],
   },
   {
-    title: "Accounts",
-    path: "/transactions",
-    icon: ArrowLeftRight,
-    perms: [
-      "accounts.manage",
-      "accounts.approve",
-      "expenses.create",
-      "expenses.approve",
-      "reports.view",
-    ],
+    title: "Expenses",
+    path: "/transactions/expense",
+    icon: Receipt,
+    perms: ["expenses.create", "expenses.approve", "accounts.manage"],
     children: [
       {
-        title: "Expenses",
+        title: "Expense Vouchers",
         path: "/transactions/expenses",
         perms: ["expenses.create", "expenses.approve"],
       },
+      {
+        title: "Expense Heads",
+        path: "/transactions/expense-heads",
+        perms: ["accounts.manage"],
+      },
+    ],
+  },
+  {
+    title: "Accounts",
+    path: "/transactions",
+    icon: ArrowLeftRight,
+    perms: ["accounts.manage", "accounts.approve", "reports.view"],
+    children: [
       {
         title: "Journal Vouchers",
         path: "/transactions/journal",
@@ -136,7 +144,6 @@ export const navItems: NavItem[] = [
         path: "/transactions/chart-of-accounts",
         perms: ["accounts.manage", "reports.view"],
       },
-      { title: "Expense Heads", path: "/transactions/expense-heads", perms: ["accounts.manage"] },
       {
         title: "Opening Balances",
         path: "/transactions/opening-balances",

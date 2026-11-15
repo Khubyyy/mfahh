@@ -18,13 +18,15 @@ import {
   getProductReport,
   getProfitLoss,
   getPurchaseReport,
+  getReceiptsReport,
   getSalesReport,
   getSamplesReport,
   getStockStatement,
   getTrialBalance,
 } from "@/server/functions/reports";
-import { CUSTOMER_CATEGORIES, PRODUCT_CATEGORIES, SUPPLIER_CATEGORIES } from "@/shared/masters";
-import { PartyStatement, usePeriod } from "./Ledger";
+import { useCategoryOptions } from "@/components/masters/CategoryManager";
+import { PartyStatement, StockMovement, usePeriod } from "./Ledger";
+import { ContactFooter, Letterhead, TitlePill } from "@/components/print/PrintShell";
 
 type Row = Record<string, string | number | boolean | null>;
 const s = (r: Row, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
@@ -72,16 +74,20 @@ function ReportFrame({
   return (
     <div className="space-y-4">
       <div className="no-print flex flex-wrap items-end gap-3">{controls}</div>
-      <div className="print-area space-y-3">
+      <div
+        className="print-area space-y-3"
+        style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}
+      >
         <div className="hidden print:block">
-          <p className="text-lg font-bold">{lk?.company?.name}</p>
-          <p className="text-xs">
-            {lk?.company?.address} {lk?.company?.ntn ? `· NTN ${lk.company.ntn}` : ""}
-          </p>
+          <Letterhead compact />
+          <TitlePill title={title} sub={period} />
         </div>
-        <h2 className="text-xl font-bold text-navy">{title}</h2>
-        {period && <p className="text-sm text-muted-foreground">{period}</p>}
+        <h2 className="text-xl font-bold text-navy print:hidden">{title}</h2>
+        {period && <p className="text-sm text-muted-foreground print:hidden">{period}</p>}
         {children}
+        <div className="hidden print:block">
+          <ContactFooter company={lk?.company ?? null} />
+        </div>
       </div>
     </div>
   );
@@ -367,7 +373,7 @@ export function AgeingReport({ partyType }: { partyType: "customer" | "supplier"
     { enabled: p.ready },
   );
   const rows = q.data ?? [];
-  const cats = partyType === "customer" ? CUSTOMER_CATEGORIES : SUPPLIER_CATEGORIES;
+  const cats = useCategoryOptions(partyType === "customer" ? "customer" : "supplier");
   const title =
     partyType === "customer"
       ? "Customer Outstanding & Ageing"
@@ -473,9 +479,29 @@ export function StatementReport({ partyType }: { partyType: "customer" | "suppli
 
 /* --------------------------------------------------------------- stock */
 
-export function StockStatementReport({ title = "Stock Statement" }: { title?: string }) {
+const STOCK_COLS: [string, string][] = [
+  ["openingQty", "Opening"],
+  ["purchases", "Purchases"],
+  ["sales", "Sales"],
+  ["salesReturns", "Sales returns"],
+  ["supplierReturns", "Supplier returns"],
+  ["samples", "Samples (net)"],
+  ["adjustments", "Adjust­ments"],
+  ["damaged", "Damaged"],
+  ["closingQty", "Closing"],
+];
+
+export function StockStatementReport({
+  title = "Stock Statement",
+  onProduct,
+}: {
+  title?: string;
+  /** Clicking a row opens that book's movement. */
+  onProduct?: (id: string) => void;
+}) {
   const p = usePeriod();
   const [category, setCategory] = useState("All");
+  const productCats = useCategoryOptions("product");
   const q = useApi(
     ["stock-statement", p.from, p.to, category],
     () =>
@@ -497,7 +523,7 @@ export function StockStatementReport({ title = "Stock Statement" }: { title?: st
             className="w-48"
             value={category}
             onChange={setCategory}
-            options={["All", ...PRODUCT_CATEGORIES]}
+            options={["All", ...productCats]}
           />
         </>
       }
@@ -517,31 +543,24 @@ export function StockStatementReport({ title = "Stock Statement" }: { title?: st
             pageSize={100}
             exportName="stock-statement"
             exportTitle={`${title} ${p.from} to ${p.to}`}
+            {...(onProduct ? { onRowClick: (r: Row) => onProduct(s(r, "id")) } : {})}
             columns={[
-              text("code", "Code"),
               text("name", "Book / product"),
-              text("className", "Class"),
-              qty("openingQty", "Opening"),
-              qty("received", "Received"),
-              qty("sold", "Sold (net)"),
-              qty("samples", "Samples (net)"),
-              qty("adjustments", "Adjust / damaged"),
-              qty("closingQty", "Closing qty"),
+              text("code", "Code"),
+              ...STOCK_COLS.map(([k, h]) => qty(k, h)),
               money("unitCost", "Unit cost"),
               money("closingValue", "Closing value"),
             ]}
             footer={
               <tr>
-                <td colSpan={3} className="py-2">
+                <td colSpan={2} className="py-2">
                   Totals
                 </td>
-                {["openingQty", "received", "sold", "samples", "adjustments", "closingQty"].map(
-                  (k) => (
-                    <td key={k} className="text-right tabular-nums">
-                      {formatQty(sum(rows, k))}
-                    </td>
-                  ),
-                )}
+                {STOCK_COLS.map(([k]) => (
+                  <td key={k} className="text-right tabular-nums">
+                    {formatQty(sum(rows, k))}
+                  </td>
+                ))}
                 <td />
                 <td className="text-right tabular-nums">
                   {formatAmount(sum(rows, "closingValue"))}
@@ -561,7 +580,8 @@ const SALES_GROUPS = [
   ["date", "Date"],
   ["month", "Month"],
   ["customer", "Customer"],
-  ["customerCategory", "Customer category"],
+  ["customerCategory", "Customer type"],
+  ["customerLocation", "Customer location"],
   ["product", "Book / product"],
   ["className", "Class"],
   ["subject", "Subject"],
@@ -636,6 +656,7 @@ export function SalesReport() {
               money("net", "Net sales"),
               money("cost", "Cost"),
               money("margin", "Margin"),
+              ...(groupBy === "customer" ? [money("outstanding", "Outstanding balance")] : []),
             ]}
           />
         </>
@@ -709,16 +730,22 @@ export function PurchaseReport() {
 
 export function ExpenseReport() {
   const p = usePeriod();
-  const [groupBy, setGroupBy] = useState<"date" | "month" | "head" | "method">("head");
+  const { data: lk } = useLookups();
+  const [groupBy, setGroupBy] = useState<"detail" | "date" | "month" | "head" | "method">("head");
+  const [headId, setHeadId] = useState("all");
   const q = useApi(
-    ["expense-report", p.from, p.to, groupBy],
-    () => getExpenseReport({ data: { from: p.from, to: p.to, groupBy } }),
+    ["expense-report", p.from, p.to, groupBy, headId],
+    () =>
+      getExpenseReport({
+        data: { from: p.from, to: p.to, groupBy, ...(headId !== "all" ? { headId } : {}) },
+      }),
     { enabled: p.ready },
   );
   const rows = q.data ?? [];
+  const headName = lk?.expenseHeads.find((h) => h.id === headId)?.name;
   return (
     <ReportFrame
-      title="Expense Report"
+      title={headName ? `Expense Report – ${headName}` : "Expense Report"}
       period={`${formatDate(p.from)} to ${formatDate(p.to)}`}
       controls={
         <>
@@ -730,9 +757,20 @@ export function ExpenseReport() {
             onChange={(v) => setGroupBy(v as typeof groupBy)}
             options={[
               { value: "head", label: "Expense head" },
+              { value: "detail", label: "Voucher list (detail)" },
               { value: "month", label: "Month" },
               { value: "date", label: "Date" },
               { value: "method", label: "Payment method" },
+            ]}
+          />
+          <SelectField
+            label="Expense head"
+            className="w-56"
+            value={headId}
+            onChange={setHeadId}
+            options={[
+              { value: "all", label: "All heads" },
+              ...(lk?.expenseHeads ?? []).map((h) => ({ value: h.id, label: h.name })),
             ]}
           />
         </>
@@ -740,6 +778,36 @@ export function ExpenseReport() {
     >
       {!q.data ? (
         <Loading error={q.error} />
+      ) : groupBy === "detail" ? (
+        <DataTable
+          rows={rows}
+          pageSize={100}
+          exportName="expense-vouchers"
+          exportTitle={`Expense vouchers ${p.from} to ${p.to}`}
+          columns={[
+            {
+              key: "date",
+              header: "Date",
+              value: (r) => s(r, "date"),
+              render: (r) => formatDate(s(r, "date")),
+            },
+            text("docNo", "Voucher"),
+            text("head", "Expense head"),
+            text("paidTo", "Paid to"),
+            text("narration", "Description"),
+            text("reference", "Bill no."),
+            text("method", "Method"),
+            money("amount", "Amount"),
+          ]}
+          footer={
+            <tr>
+              <td colSpan={7} className="py-2">
+                Total ({rows.length} vouchers)
+              </td>
+              <td className="text-right tabular-nums">{formatAmount(sum(rows, "amount"))}</td>
+            </tr>
+          }
+        />
       ) : (
         <DataTable
           rows={rows}
@@ -1144,6 +1212,193 @@ export function BankFinanceReport() {
             />
           </section>
         </div>
+      )}
+    </ReportFrame>
+  );
+}
+
+/* ------------------------------------------------------------- receipts */
+
+export function ReceiptsReport() {
+  const p = usePeriod();
+  const { data: lk } = useLookups();
+  const [groupBy, setGroupBy] = useState<"detail" | "date" | "customer" | "method">("detail");
+  const [customerId, setCustomerId] = useState("");
+  const q = useApi(
+    ["receipts-report", p.from, p.to, groupBy, customerId],
+    () =>
+      getReceiptsReport({
+        data: { from: p.from, to: p.to, groupBy, ...(customerId ? { customerId } : {}) },
+      }),
+    { enabled: p.ready },
+  );
+  const rows = q.data ?? [];
+  const label = { detail: "Receipts", date: "Date", customer: "Customer", method: "Method" }[
+    groupBy
+  ];
+  return (
+    <ReportFrame
+      title={groupBy === "detail" ? "Receivings" : `Receipts by ${label}`}
+      period={`${formatDate(p.from)} – ${formatDate(p.to)}`}
+      controls={
+        <>
+          <DateRangeInputs from={p.from} to={p.to} onChange={p.setRange} />
+          <SelectField
+            label="Show"
+            className="w-52"
+            value={groupBy}
+            onChange={(v) => setGroupBy(v as typeof groupBy)}
+            options={[
+              { value: "detail", label: "Receipts register" },
+              { value: "date", label: "Date-wise totals" },
+              { value: "customer", label: "Customer-wise totals" },
+              { value: "method", label: "Payment-method totals" },
+            ]}
+          />
+          <Field label="Customer" className="w-64">
+            <SearchSelect
+              options={[
+                { value: "", label: "All customers" },
+                ...(lk?.customers ?? []).map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                  hint: [c.code, c.phone].filter(Boolean).join(" · "),
+                })),
+              ]}
+              value={customerId}
+              onChange={setCustomerId}
+            />
+          </Field>
+        </>
+      }
+    >
+      {!q.data ? (
+        <Loading error={q.error} />
+      ) : (
+        <>
+          <TotalsBar items={[["Total received", sum(rows, "amount")]]} />
+          {groupBy === "detail" ? (
+            <DataTable
+              rows={rows}
+              pageSize={200}
+              exportName="receivings"
+              exportTitle={`Receivings ${p.from} to ${p.to}`}
+              columns={[
+                {
+                  key: "date",
+                  header: "Date",
+                  value: (r) => s(r, "date"),
+                  render: (r) => formatDate(s(r, "date")),
+                },
+                text("customer", "Customer"),
+                text("description", "Description"),
+                text("docNo", "Receipt no."),
+                text("account", "Received into"),
+                money("amount", "Amount"),
+              ]}
+              footer={
+                <tr>
+                  <td colSpan={5} className="py-2">
+                    Total ({rows.length} receipts)
+                  </td>
+                  <td className="text-right tabular-nums">{formatAmount(sum(rows, "amount"))}</td>
+                </tr>
+              }
+            />
+          ) : (
+            <DataTable
+              rows={rows}
+              pageSize={200}
+              exportName={`receipts-by-${groupBy}`}
+              columns={[
+                {
+                  key: "group",
+                  header: label,
+                  value: (r) => s(r, "group"),
+                  render: (r) => (groupBy === "date" ? formatDate(s(r, "group")) : s(r, "group")),
+                },
+                qty("receipts", "Receipts"),
+                money("amount", "Amount"),
+              ]}
+              footer={
+                <tr>
+                  <td className="py-2">Total</td>
+                  <td className="text-right">{formatQty(sum(rows, "receipts"))}</td>
+                  <td className="text-right tabular-nums">{formatAmount(sum(rows, "amount"))}</td>
+                </tr>
+              }
+            />
+          )}
+        </>
+      )}
+    </ReportFrame>
+  );
+}
+
+/* ----------------------------------------------------- product movement */
+
+/** One book: opening, every kind of movement and closing, then the dated movement list. */
+export function ProductMovementReport({ initialId }: { initialId?: string | null }) {
+  const p = usePeriod();
+  const { data: lk } = useLookups();
+  const [productId, setProductId] = useState(initialId ?? "");
+  const q = useApi(
+    ["stock-statement-one", productId, p.from, p.to],
+    () => getStockStatement({ data: { from: p.from, to: p.to, productId } }),
+    { enabled: p.ready && Boolean(productId) },
+  );
+  const r = (q.data ?? [])[0];
+  const name = lk?.products.find((x) => x.id === productId)?.name ?? "";
+  return (
+    <ReportFrame
+      title={name ? `Stock Movement – ${name}` : "Product-wise Stock Movement"}
+      period={`${formatDate(p.from)} – ${formatDate(p.to)}`}
+      controls={
+        <Field label="Book / product" className="w-80">
+          <SearchSelect
+            ariaLabel="Book / product"
+            placeholder="Search by title or code…"
+            options={(lk?.products ?? []).map((x) => ({
+              value: x.id,
+              label: x.name,
+              hint: `${x.code} · Stock ${x.stockQty}`,
+            }))}
+            value={productId}
+            onChange={setProductId}
+          />
+        </Field>
+      }
+    >
+      {!productId ? (
+        <p className="py-8 text-center text-muted-foreground">
+          Choose a book to see its opening stock, purchases, sales, returns, samples, adjustments,
+          damaged stock and closing stock, with every dated movement.
+        </p>
+      ) : !r ? (
+        <Loading error={q.error} />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            {STOCK_COLS.map(([k, h]) => (
+              <div
+                key={k}
+                className={`rounded-lg border px-3 py-2 ${k === "closingQty" || k === "openingQty" ? "bg-primary/5" : "bg-muted/30"}`}
+              >
+                <p className="text-xs text-muted-foreground">{h.replace("\u00ad", "")}</p>
+                <p className="text-lg font-bold tabular-nums text-navy">
+                  {formatQty(Number(r[k] ?? 0))}
+                </p>
+              </div>
+            ))}
+            <div className="rounded-lg border bg-muted/30 px-3 py-2">
+              <p className="text-xs text-muted-foreground">Closing value</p>
+              <p className="text-lg font-bold tabular-nums text-navy">
+                {formatPKR(Number(r["closingValue"] ?? 0))}
+              </p>
+            </div>
+          </div>
+          <StockMovement productId={productId} period={p} />
+        </>
       )}
     </ReportFrame>
   );

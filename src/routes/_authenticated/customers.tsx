@@ -1,10 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { MasterPage } from "@/components/masters/MasterPage";
-import { partyFields } from "@/components/masters/partyFields";
+import { customerFields } from "@/components/masters/partyFields";
+import { ManageCategoriesButton } from "@/components/masters/CategoryManager";
 import { PartyStatement } from "@/components/reports/Ledger";
 import { DocumentListInline } from "@/components/documents/DocumentListInline";
 import { formatPKR } from "@/lib/format";
-import { CUSTOMER_CATEGORIES } from "@/shared/masters";
 
 export const Route = createFileRoute("/_authenticated/customers")({
   head: () => ({ meta: [{ title: "Customers – MFAHH" }] }),
@@ -15,31 +15,23 @@ export const Route = createFileRoute("/_authenticated/customers")({
       section="Customers"
       singular="Customer"
       editPerm="customers.manage"
-      fields={[
-        ...partyFields,
-        {
-          key: "category",
-          label: "Category",
-          type: "select",
-          options: CUSTOMER_CATEGORIES,
-          required: true,
-        },
-        { key: "creditLimit", label: "Credit limit (Rs, 0 = none)", type: "number" },
-        { key: "notes", label: "Notes", type: "textarea" },
-      ]}
+      fields={customerFields}
+      headerActions={<ManageCategoriesButton kinds={["customer", "customerLocation"]} />}
       columns={[
         { key: "code", header: "Code" },
         { key: "name", header: "Name" },
-        { key: "category", header: "Category" },
+        { key: "category", header: "Type" },
+        { key: "location", header: "Location" },
         { key: "city", header: "City" },
         { key: "phone", header: "Phone" },
         { key: "balance", header: "Balance", kind: "money" },
         { key: "overdue", header: "Overdue", kind: "money" },
-        { key: "creditLimit", header: "Credit limit", kind: "money" },
+        { key: "discountPct", header: "Disc %" },
         { key: "status", header: "Status", kind: "status" },
       ]}
       filters={[
-        { key: "category", label: "Categories" },
+        { key: "category", label: "Customer types" },
+        { key: "location", label: "Locations" },
         { key: "city", label: "Cities" },
       ]}
       kpis={(rows) => {

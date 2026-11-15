@@ -6,9 +6,15 @@ export const Route = createFileRoute("/_authenticated/transactions/expense-heads
   component: () => (
     <MasterPage
       entity="expenseHeads"
-      title="Expense Heads"
-      section="Accounts"
+      title="Expense Heads / Categories"
+      section="Expenses"
       singular="Expense Head"
+      headerExtra={
+        <p className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-2 text-sm text-muted-foreground">
+          Add, rename or deactivate expense heads here. Each head posts to its ledger account, so
+          the head chosen on a voucher flows straight into the expense reports and the accounts.
+        </p>
+      }
       editPerm="accounts.manage"
       fields={[
         { key: "name", label: "Expense head", required: true },

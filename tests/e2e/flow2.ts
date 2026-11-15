@@ -56,7 +56,7 @@ async function stockOf(page: Page) {
   const row = page.getByRole("row").filter({ hasText: BOOK });
   await row.waitFor({ timeout: 15_000 });
   const cells = await row.getByRole("cell").allInnerTexts();
-  return Number(cells[6]!.replace(/,/g, ""));
+  return Number(cells[7]!.replace(/,/g, ""));
 }
 
 async function expectStock(page: Page, qty: number) {

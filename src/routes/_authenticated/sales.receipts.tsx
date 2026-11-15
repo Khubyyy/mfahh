@@ -9,7 +9,20 @@ export const Route = createFileRoute("/_authenticated/sales/receipts")({
       section="Sales"
       types={["RV"]}
       create={["RV"]}
-      columns={["docNo", "date", "party", "method", "reference", "total", "status", "createdBy"]}
+      columns={[
+        "docNo",
+        "date",
+        "party",
+        "receivedAs",
+        "reference",
+        "total",
+        "status",
+        "createdBy",
+      ]}
+      filters={[
+        { key: "method", label: "Methods" },
+        { key: "partyName", label: "Customers" },
+      ]}
     />
   ),
 });

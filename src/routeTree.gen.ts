@@ -17,6 +17,7 @@ import { Route as AuthenticatedCustomersRouteImport } from './routes/_authentica
 import { Route as AuthenticatedReportsRouteImport } from './routes/_authenticated/reports'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
 import { Route as PrintIdRouteImport } from './routes/print.$id'
+import { Route as PrintMonthlyRouteImport } from './routes/print.monthly'
 import { Route as PrintStatementRouteImport } from './routes/print.statement'
 import { Route as AuthenticatedInventoryAdjustmentsRouteImport } from './routes/_authenticated/inventory.adjustments'
 import { Route as AuthenticatedInventoryBooksRouteImport } from './routes/_authenticated/inventory.books'
@@ -88,6 +89,11 @@ const AuthenticatedSuppliersRoute = AuthenticatedSuppliersRouteImport.update({
 const PrintIdRoute = PrintIdRouteImport.update({
   id: '/print/$id',
   path: '/print/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrintMonthlyRoute = PrintMonthlyRouteImport.update({
+  id: '/print/monthly',
+  path: '/print/monthly',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PrintStatementRoute = PrintStatementRouteImport.update({
@@ -293,6 +299,7 @@ export interface FileRoutesByFullPath {
   '/reports': typeof AuthenticatedReportsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
   '/print/$id': typeof PrintIdRoute
+  '/print/monthly': typeof PrintMonthlyRoute
   '/print/statement': typeof PrintStatementRoute
   '/inventory/adjustments': typeof AuthenticatedInventoryAdjustmentsRoute
   '/inventory/books': typeof AuthenticatedInventoryBooksRoute
@@ -334,6 +341,7 @@ export interface FileRoutesByTo {
   '/reports': typeof AuthenticatedReportsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
   '/print/$id': typeof PrintIdRoute
+  '/print/monthly': typeof PrintMonthlyRoute
   '/print/statement': typeof PrintStatementRoute
   '/': typeof AuthenticatedIndexRoute
   '/inventory/adjustments': typeof AuthenticatedInventoryAdjustmentsRoute
@@ -378,6 +386,7 @@ export interface FileRoutesById {
   '/_authenticated/reports': typeof AuthenticatedReportsRoute
   '/_authenticated/suppliers': typeof AuthenticatedSuppliersRoute
   '/print/$id': typeof PrintIdRoute
+  '/print/monthly': typeof PrintMonthlyRoute
   '/print/statement': typeof PrintStatementRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/inventory/adjustments': typeof AuthenticatedInventoryAdjustmentsRoute
@@ -423,6 +432,7 @@ export interface FileRouteTypes {
     | '/reports'
     | '/suppliers'
     | '/print/$id'
+    | '/print/monthly'
     | '/print/statement'
     | '/inventory/adjustments'
     | '/inventory/books'
@@ -464,6 +474,7 @@ export interface FileRouteTypes {
     | '/reports'
     | '/suppliers'
     | '/print/$id'
+    | '/print/monthly'
     | '/print/statement'
     | '/'
     | '/inventory/adjustments'
@@ -507,6 +518,7 @@ export interface FileRouteTypes {
     | '/_authenticated/reports'
     | '/_authenticated/suppliers'
     | '/print/$id'
+    | '/print/monthly'
     | '/print/statement'
     | '/_authenticated/'
     | '/_authenticated/inventory/adjustments'
@@ -547,6 +559,7 @@ export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
   PrintIdRoute: typeof PrintIdRoute
+  PrintMonthlyRoute: typeof PrintMonthlyRoute
   PrintStatementRoute: typeof PrintStatementRoute
   ApiFilesBackupNameRoute: typeof ApiFilesBackupNameRoute
   ApiFilesStaffDocumentIdRoute: typeof ApiFilesStaffDocumentIdRoute
@@ -608,6 +621,13 @@ declare module '@tanstack/react-router' {
       path: '/print/$id'
       fullPath: '/print/$id'
       preLoaderRoute: typeof PrintIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/print/monthly': {
+      id: '/print/monthly'
+      path: '/print/monthly'
+      fullPath: '/print/monthly'
+      preLoaderRoute: typeof PrintMonthlyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/print/statement': {
@@ -939,6 +959,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
   PrintIdRoute: PrintIdRoute,
+  PrintMonthlyRoute: PrintMonthlyRoute,
   PrintStatementRoute: PrintStatementRoute,
   ApiFilesBackupNameRoute: ApiFilesBackupNameRoute,
   ApiFilesStaffDocumentIdRoute: ApiFilesStaffDocumentIdRoute,

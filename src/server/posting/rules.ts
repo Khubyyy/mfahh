@@ -2,7 +2,7 @@
  * Accounting rules: what each document type posts when approved, and how it is reversed when cancelled.
  * All work happens inside the caller's transaction with the document row locked.
  */
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 import * as t from "../db/schema";
 import { checkAllocations, salaryPayable, staffAdvances } from "./prepare";
 import { fail, type Doc, type Line, type PostingContext } from "./context";
@@ -56,7 +56,15 @@ export async function post(ctx: PostingContext, doc: Doc, lines: Line[]) {
 
   switch (doc.type) {
     case "SO":
-      break; // orders reserve nothing; invoices deliver against them
+      // Orders reserve nothing; invoices deliver against them. An order recorded from an
+      // existing invoice is already fulfilled by it, so it can never be invoiced a second time.
+      if (doc.refDocId) {
+        const inv = await lockDoc(ctx, doc.refDocId);
+        if (inv.type !== "SI" || inv.status !== "Approved")
+          fail(`${inv.docNo} must be an approved invoice.`);
+        for (const l of lines) await addDone(ctx, l.id, l.qty - l.doneQty);
+      }
+      break;
 
     case "SI": {
       if (doc.refDocId) {
@@ -86,7 +94,8 @@ export async function post(ctx: PostingContext, doc: Doc, lines: Line[]) {
       const inv = await lockDoc(ctx, doc.refDocId!);
       if (inv.status !== "Approved") fail(`${inv.docNo} is no longer approved.`);
       const invLines = new Map((await linesOf(ctx, inv.id)).map((l) => [l.id, l]));
-      let cost = 0;
+      let cost = 0,
+        damaged = 0;
       for (const l of lines) {
         const o = invLines.get(l.refLineId!) ?? fail("Invoice line not found.");
         if (o.doneQty + l.qty > o.qty) fail(`Line ${l.lineNo}: more than sold is being returned.`);
@@ -99,6 +108,16 @@ export async function post(ctx: PostingContext, doc: Doc, lines: Line[]) {
         );
         await stampCost(ctx, l.id, o.unitCost ?? 0);
         cost += value;
+        if (l.extra["condition"] === "Damaged") {
+          // Back from the customer but not saleable: straight out of saleable stock into the
+          // damaged register, written off at the same cost.
+          await ctx.moveStock(doc, l.productId!, -l.qty, value);
+          await ctx.tx
+            .update(t.products)
+            .set({ damagedQty: sql`${t.products.damagedQty} + ${l.qty}` })
+            .where(eq(t.products.id, l.productId!));
+          damaged += value;
+        }
       }
       await ctx.tx
         .update(t.documents)
@@ -109,6 +128,15 @@ export async function post(ctx: PostingContext, doc: Doc, lines: Line[]) {
       ctx.cr(await ctx.account("AR"), doc.total, party);
       ctx.dr(await ctx.account("INVENTORY"), cost);
       ctx.cr(await ctx.account("COGS"), cost);
+      if (damaged > 0) {
+        ctx.dr(
+          await ctx.account("STOCK_LOSS"),
+          damaged,
+          null,
+          "Damaged goods returned by customer",
+        );
+        ctx.cr(await ctx.account("INVENTORY"), damaged);
+      }
       break;
     }
 
@@ -424,8 +452,8 @@ export async function reverse(ctx: PostingContext, doc: Doc, lines: Line[]) {
       .set({ paidAmount: round2(payroll.paidAmount - doc.total) })
       .where(eq(t.documents.id, payroll.id));
   }
-  if (doc.type === "DMG") {
-    for (const l of lines) {
+  if (doc.type === "DMG" || doc.type === "SR") {
+    for (const l of lines.filter((x) => doc.type === "DMG" || x.extra["condition"] === "Damaged")) {
       await ctx.tx
         .update(t.products)
         .set({ damagedQty: sql`${t.products.damagedQty} - ${l.qty}` })
@@ -437,7 +465,8 @@ export async function reverse(ctx: PostingContext, doc: Doc, lines: Line[]) {
   const moves = await ctx.tx
     .select()
     .from(t.stockLedger)
-    .where(and(eq(t.stockLedger.documentId, doc.id), eq(t.stockLedger.isReversal, false)));
+    .where(and(eq(t.stockLedger.documentId, doc.id), eq(t.stockLedger.isReversal, false)))
+    .orderBy(desc(t.stockLedger.id)); // undo the last movement first
   await ctx.lockProducts(moves.map((m) => m.productId));
   for (const m of moves) {
     await ctx.moveStock(doc, m.productId, m.qtyIn > 0 ? -m.qtyIn : m.qtyOut, m.value, true);

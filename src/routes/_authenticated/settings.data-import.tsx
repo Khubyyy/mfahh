@@ -11,7 +11,6 @@ import { errorText } from "@/lib/api";
 import { useLookups } from "@/lib/lookups";
 import { useSession } from "@/lib/session";
 import { importMasters, importOpeningBalances } from "@/server/functions/imports";
-import { CUSTOMER_CATEGORIES, PRODUCT_CATEGORIES, SUPPLIER_CATEGORIES } from "@/shared/masters";
 import type { Permission } from "@/shared/permissions";
 
 export const Route = createFileRoute("/_authenticated/settings/data-import")({
@@ -39,6 +38,8 @@ const TEMPLATES: Record<
       "ntn",
       "creditDays",
       "creditLimit",
+      "location",
+      "discountPct",
     ],
     sample: [
       "CUS-001",
@@ -52,8 +53,10 @@ const TEMPLATES: Record<
       "",
       30,
       400000,
+      "Karachi",
+      10,
     ],
-    note: `Category: ${CUSTOMER_CATEGORIES.join(", ")}`,
+    note: "Category: one of your customer types (Customers → Manage categories). Location: Karachi or Outside Karachi (blank = worked out from city). Optional discountPct column.",
   },
   suppliers: {
     label: "Suppliers / vendors",
@@ -82,7 +85,7 @@ const TEMPLATES: Record<
       "1234567-8",
       30,
     ],
-    note: `Category: ${SUPPLIER_CATEGORIES.join(", ")}`,
+    note: "Category: one of your supplier categories (Suppliers → Manage categories).",
   },
   products: {
     label: "Books & products",
@@ -111,7 +114,7 @@ const TEMPLATES: Record<
       250,
       50,
     ],
-    note: `Category: ${PRODUCT_CATEGORIES.join(", ")}. Opening stock is imported separately as opening balances.`,
+    note: "Category: one of your book categories (Books & Products → Manage categories). Opening stock is imported separately as opening balances.",
   },
   opening: {
     label: "Opening balances",

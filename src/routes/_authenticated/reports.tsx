@@ -12,7 +12,9 @@ import {
   MonthlyManagementReport,
   ProductReport,
   ProfitLossReport,
+  ProductMovementReport,
   PurchaseReport,
+  ReceiptsReport,
   SalesReport,
   SamplesReport,
   StatementReport,
@@ -20,6 +22,7 @@ import {
   TrialBalanceReport,
 } from "@/components/reports/Reports";
 import { cn } from "@/lib/utils";
+import { MonthlyPackLauncher } from "@/components/reports/MonthlyPackLauncher";
 
 const REPORTS: { id: string; group: string; title: string; render: () => ReactNode }[] = [
   {
@@ -45,6 +48,12 @@ const REPORTS: { id: string; group: string; title: string; render: () => ReactNo
     group: "Financial statements",
     title: "Cash & Bank",
     render: () => <CashBankReport />,
+  },
+  {
+    id: "pack",
+    group: "Management",
+    title: "Monthly Report Pack (print)",
+    render: () => <MonthlyPackLauncher />,
   },
   {
     id: "mma",
@@ -88,6 +97,12 @@ const REPORTS: { id: string; group: string; title: string; render: () => ReactNo
     title: "Supplier / Vendor Statements",
     render: () => <StatementReport key="s" partyType="supplier" />,
   },
+  {
+    id: "receipts",
+    group: "Operations",
+    title: "Receipts (Receivings)",
+    render: () => <ReceiptsReport />,
+  },
   { id: "sales", group: "Operations", title: "Sales Reports", render: () => <SalesReport /> },
   {
     id: "purchases",
@@ -106,6 +121,12 @@ const REPORTS: { id: string; group: string; title: string; render: () => ReactNo
     group: "Operations",
     title: "Stock Statement (bank-ready)",
     render: () => <StockStatementReport />,
+  },
+  {
+    id: "movement",
+    group: "Operations",
+    title: "Product-wise Stock Movement",
+    render: () => <ProductMovementReport />,
   },
   { id: "samples", group: "Operations", title: "Samples Report", render: () => <SamplesReport /> },
   {

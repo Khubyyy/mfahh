@@ -83,6 +83,7 @@ async function balance(key: string, partyId?: string) {
 }
 
 const run = TEST_URL && TEST_OWNER_URL ? describe : describe.skip;
+const round = (x: number) => Math.round(x * 100) / 100;
 
 run("posting engine", () => {
   beforeAll(async () => {
@@ -331,6 +332,122 @@ run("posting engine", () => {
       lines: [{ partyId: staffId, rate: 52000 }],
     });
     expect(await balance("SALARY_PAYABLE", staffId)).toBe(0);
+  });
+
+  it("invoice-first: records an order from an invoice without any extra stock or ledger postings", async () => {
+    const si = await newDoc({
+      type: "SI",
+      date: today,
+      partyId: customerId,
+      lines: [{ productId: bookId, qty: 4, rate: 100 }],
+    });
+    const stockBefore = (await product()).stockQty;
+    const glBefore = await trialBalance();
+    const so = await engine.orderFromInvoice(maker, si.id);
+    const order = await doc(so.id);
+    expect(order.type).toBe("SO");
+    expect(order.status).toBe("Approved");
+    expect(order.refDocId).toBe(si.id);
+    expect(order.total).toBe(400);
+    // Nothing moved: no stock, no journal.
+    expect((await product()).stockQty).toBe(stockBefore);
+    expect(await trialBalance()).toEqual(glBefore);
+    const [glRows] = await db().execute<{ n: string }>(
+      sql`select count(*) n from gl_entries where document_id = ${so.id}`,
+    );
+    expect(Number(glRows!.n)).toBe(0);
+    // Order is already fulfilled by the invoice, so it cannot be invoiced again.
+    const soLines = await db()
+      .select()
+      .from(t.documentLines)
+      .where(eq(t.documentLines.documentId, so.id));
+    expect(soLines.every((l) => l.doneQty === l.qty)).toBe(true);
+    await expect(
+      engine.createDocument(maker, {
+        type: "SI",
+        date: today,
+        partyId: customerId,
+        refDocId: so.id,
+        lines: [{ productId: bookId, qty: 1, rate: 100, refLineId: soLines[0]!.id }],
+      }),
+    ).rejects.toThrow(/remain to deliver/);
+    // Only one order per invoice.
+    await expect(engine.orderFromInvoice(maker, si.id)).rejects.toThrow(/already has sales order/);
+    // Cancelling the invoice reverses it and takes the mirror order with it.
+    await engine.cancelDocument(checker, si.id, "entered twice");
+    expect((await doc(so.id)).status).toBe("Cancelled");
+    expect((await product()).stockQty).toBe(stockBefore + 4);
+  });
+
+  it("damaged customer returns credit the customer but go to damaged stock, not saleable stock", async () => {
+    const si = await newDoc({
+      type: "SI",
+      date: today,
+      partyId: customerId,
+      lines: [{ productId: bookId, qty: 10, rate: 100 }],
+    });
+    const before = await product();
+    const arBefore = await balance("AR", customerId);
+    const lossBefore = await balance("STOCK_LOSS");
+    const [line] = await db()
+      .select()
+      .from(t.documentLines)
+      .where(eq(t.documentLines.documentId, si.id));
+    const sr = await newDoc({
+      type: "SR",
+      date: today,
+      partyId: customerId,
+      refDocId: si.id,
+      extra: { reason: "torn covers" },
+      lines: [{ refLineId: line!.id, qty: 3, extra: { condition: "Damaged" } }],
+    });
+    const after = await product();
+    expect(after.stockQty).toBe(before.stockQty); // came back, but not saleable
+    expect(after.damagedQty).toBe(before.damagedQty + 3);
+    expect(await balance("AR", customerId)).toBe(arBefore - 300);
+    expect(round((await balance("STOCK_LOSS")) - lossBefore)).toBe(
+      round(3 * (line!.unitCost ?? 0)),
+    );
+    const tb = await trialBalance();
+    expect(round(tb.dr)).toBe(round(tb.cr));
+    // Cancelling the return restores everything.
+    await engine.cancelDocument(checker, sr.id, "wrong condition");
+    const undone = await product();
+    expect(undone.stockQty).toBe(before.stockQty);
+    expect(undone.damagedQty).toBe(before.damagedQty);
+    expect(await balance("AR", customerId)).toBe(arBefore);
+  });
+
+  it("a document awaiting approval can be edited, which sends it back to draft", async () => {
+    const so = await engine.createDocument(maker, {
+      type: "SO",
+      date: today,
+      partyId: customerId,
+      lines: [{ productId: bookId, qty: 2, rate: 100 }],
+    });
+    await engine.submitDocument(maker, so.id);
+    expect((await doc(so.id)).status).toBe("Pending");
+    await engine.updateDraft(maker, so.id, {
+      type: "SO",
+      date: today,
+      partyId: customerId,
+      lines: [{ productId: bookId, qty: 5, rate: 100 }],
+    });
+    const d = await doc(so.id);
+    expect(d.status).toBe("Draft");
+    expect(d.total).toBe(500);
+  });
+
+  it("receipts can be taken online into a bank account", async () => {
+    const rv = await newDoc({
+      type: "RV",
+      date: today,
+      partyId: customerId,
+      amount: 1000,
+      method: "Online",
+      bankAccountId: bankId,
+    });
+    expect((await doc(rv.id)).method).toBe("Online");
   });
 
   it("issues unique sequential numbers under concurrent saves", async () => {

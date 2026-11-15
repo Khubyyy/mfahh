@@ -91,8 +91,15 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
   const extra = (k: string) => (h.extra?.[k] ?? "") as string | number;
   const setLine = (k: string, patch: Partial<EditorLine>) =>
     setLines((ls) => ls.map((l) => (l.key === k ? { ...l, ...patch } : l)));
+  const customerDiscount = (partyId: string | null | undefined) =>
+    type === "SI" || type === "SO"
+      ? Number(lk?.customers.find((c) => c.id === partyId)?.discountPct ?? 0)
+      : 0;
   const addLine = (l: Partial<EditorLine> = {}) =>
-    setLines((ls) => [...ls, { key: key(), qty: 1, rate: 0, discountPct: 0, ...l }]);
+    setLines((ls) => [
+      ...ls,
+      { key: key(), qty: 1, rate: 0, discountPct: customerDiscount(h.partyId), ...l },
+    ]);
 
   async function save() {
     setBusy(true);
@@ -125,8 +132,8 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
   const products = lk.products.filter((p) => p.status === "Active");
   const productOptions: Option[] = products.map((p) => ({
     value: p.id,
-    label: `${p.code} · ${p.name}`,
-    hint: `Stock ${p.stockQty}`,
+    label: p.name,
+    hint: `${p.code} · Stock ${p.stockQty}`,
   }));
   const partyList =
     def.partyType === "customer"
@@ -138,7 +145,12 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
           : [];
   const partyOptions: Option[] = partyList
     .filter((p) => p.status === "Active")
-    .map((p) => ({ value: p.id, label: p.name, hint: p.code }));
+    .map((p) => {
+      const phone = (p as { phone?: string }).phone;
+      return { value: p.id, label: p.name, hint: [p.code, phone].filter(Boolean).join(" · ") };
+    });
+  const selectedCustomer =
+    def.partyType === "customer" ? lk.customers.find((c) => c.id === h.partyId) : undefined;
 
   const totals = docTotals(
     lines as { qty: number; rate: number; discountPct: number }[],
@@ -191,6 +203,9 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                   options={partyOptions}
                   value={h.partyId}
                   ariaLabel="Party"
+                  placeholder={
+                    def.partyType === "customer" ? "Search name, code or phone…" : "Select…"
+                  }
                   onChange={(v) => {
                     const party = partyList.find((p) => p.id === v) as
                       { creditDays?: number } | undefined;
@@ -203,6 +218,21 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                         : {}),
                     }));
                     if (["SR", "PR", "SMR"].includes(type)) setLines([]);
+                    if ((type === "SI" || type === "SO") && !h.refDocId) {
+                      // Customer-level discount: replace the previous customer's default on every
+                      // line that still carries it; lines changed by hand are left alone.
+                      const prev = customerDiscount(h.partyId);
+                      const next = customerDiscount(v);
+                      setLines((ls) =>
+                        ls.map((l) =>
+                          (l.discountPct ?? 0) === prev ? { ...l, discountPct: next } : l,
+                        ),
+                      );
+                      if (next > 0)
+                        toast.info(
+                          `Customer discount ${next}% applied to the lines. Review before saving.`,
+                        );
+                    }
                     setAlloc({});
                   }}
                 />
@@ -235,14 +265,41 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                     ? "Supplier invoice no."
                     : type === "ADJ"
                       ? "Reference (count sheet no.)"
-                      : "Reference"
+                      : type === "EXP"
+                        ? "Supporting bill / invoice no."
+                        : type === "RV"
+                          ? "Receipt book / slip no."
+                          : "Reference"
                 }
+                placeholder={type === "EXP" ? "Vendor's bill no., if any" : undefined}
                 required={type === "ADJ"}
                 value={h.reference ?? ""}
                 onChange={(v) => set("reference", v)}
               />
             )}
           </div>
+
+          {selectedCustomer && (
+            <p className="-mt-2 flex flex-wrap gap-x-4 gap-y-1 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <span>
+                <b className="text-foreground">{selectedCustomer.name}</b> · {selectedCustomer.code}
+              </span>
+              {selectedCustomer.phone && <span>☎ {selectedCustomer.phone}</span>}
+              <span>
+                {selectedCustomer.location}
+                {selectedCustomer.city && selectedCustomer.city !== selectedCustomer.location
+                  ? ` · ${selectedCustomer.city}`
+                  : ""}
+              </span>
+              <span>{selectedCustomer.category}</span>
+              {(type === "SI" || type === "SO") && Number(selectedCustomer.discountPct) > 0 && (
+                <span className="font-semibold text-primary">
+                  Customer discount {Number(selectedCustomer.discountPct)}% (applied per line,
+                  editable)
+                </span>
+              )}
+            </p>
+          )}
 
           {/* Source documents for returns and order → invoice */}
           {type === "SI" && h.partyId && !id && (
@@ -295,6 +352,7 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                 ) : type === "EXP" ? (
                   <Field label="Expense head *">
                     <SearchSelect
+                      ariaLabel="Expense head"
                       options={lk.expenseHeads
                         .filter((x) => x.status === "Active")
                         .map((x) => ({ value: x.id, label: x.name }))}
@@ -305,7 +363,40 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                 ) : null
               }
               showAmount={type !== "SALPAY"}
+              incoming={type === "RV"}
+              amountLocked={type === "EXP" && lines.some((l) => (l.rate ?? 0) > 0)}
             />
+          )}
+          {type === "EXP" && (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <TextField
+                  label="Paid to"
+                  value={String(extra("paidTo"))}
+                  placeholder="Person or vendor receiving the money"
+                  onChange={(v) => setExtra("paidTo", v)}
+                />
+                <TextField
+                  label="Department"
+                  value={String(extra("department"))}
+                  placeholder="e.g. Accounts, Production, Admin"
+                  list="departments"
+                  onChange={(v) => setExtra("department", v)}
+                />
+                <datalist id="departments">
+                  {[...new Set(lk.staff.map((x) => x.department).filter(Boolean))].map((d) => (
+                    <option key={d} value={d} />
+                  ))}
+                </datalist>
+              </div>
+              <ExpenseItems
+                lines={lines}
+                setLine={setLine}
+                addLine={() => addLine({ qty: 1, rate: 0, description: "" })}
+                remove={(k) => setLines((ls) => ls.filter((l) => l.key !== k))}
+                onTotal={(t2) => set("amount", t2)}
+              />
+            </>
           )}
 
           {type === "SMP" && (
@@ -374,7 +465,12 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
             />
           )}
           {(type === "SR" || type === "PR" || type === "SMR") && h.refDocId && (
-            <ReturnLines lines={lines} setLine={setLine} priced={type !== "SMR"} />
+            <ReturnLines
+              lines={lines}
+              setLine={setLine}
+              priced={type !== "SMR"}
+              withCondition={type === "SR"}
+            />
           )}
           {(type === "ADJ" || type === "DMG") && (
             <StockLines
@@ -464,8 +560,8 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
           )}
 
           <TextAreaField
-            label={type === "EXP" ? "Description" : type === "JV" ? "Narration" : "Remarks"}
-            required={type === "EXP" || type === "JV"}
+            label={type === "EXP" ? "Remarks" : type === "JV" ? "Narration" : "Remarks"}
+            required={(type === "EXP" && !lines.some((l) => (l.rate ?? 0) > 0)) || type === "JV"}
             value={h.narration ?? ""}
             onChange={(v) => set("narration", v)}
           />
@@ -549,44 +645,73 @@ function MoneyFields({
   lk,
   extraFields,
   showAmount,
+  incoming,
+  amountLocked,
 }: {
   h: Header;
   set: <K extends keyof Header>(k: K, v: Header[K]) => void;
   lk: Lookups;
   extraFields: ReactNode;
   showAmount: boolean;
+  incoming?: boolean;
+  amountLocked?: boolean;
 }) {
+  const banks = lk.bankAccounts.filter((b) => b.status === "Active");
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {showAmount && (
         <TextField
-          label="Amount (Rs)"
+          label={amountLocked ? "Amount (Rs) — sum of items" : "Amount (Rs)"}
           type="number"
           required
           min={0}
           step="0.01"
+          disabled={amountLocked}
           value={h.amount ?? ""}
           onChange={(v) => set("amount", num(v))}
         />
       )}
       <SelectField
-        label="Paid through"
+        label={incoming ? "Received by" : "Paid by"}
         required
         value={h.method ?? ""}
-        options={["Cash", "Bank", "Cheque"]}
-        onChange={(v) => set("method", v as Header["method"])}
+        options={[
+          { value: "Cash", label: "Cash" },
+          { value: "Online", label: "Online transfer" },
+          { value: "Cheque", label: "Cheque" },
+          { value: "Bank", label: "Bank deposit" },
+        ]}
+        onChange={(v) => {
+          set("method", v as Header["method"]);
+          if (v !== "Cash" && !h.bankAccountId && banks.length === 1)
+            set("bankAccountId", banks[0]!.id);
+        }}
       />
-      {h.method && h.method !== "Cash" && (
-        <Field label="Bank account *">
-          <SearchSelect
-            options={lk.bankAccounts
-              .filter((b) => b.status === "Active")
-              .map((b) => ({ value: b.id, label: `${b.name} (${b.accountNo})` }))}
-            value={h.bankAccountId}
-            onChange={(v) => set("bankAccountId", v)}
-          />
-        </Field>
-      )}
+      <Field label={`${incoming ? "Received into" : "Paid from"} *`}>
+        <SearchSelect
+          ariaLabel={incoming ? "Received into" : "Paid from"}
+          options={[
+            ...(h.method === "Cash" || !h.method ? [{ value: "cash", label: "Cash in hand" }] : []),
+            ...(h.method && h.method !== "Cash"
+              ? banks.map((b) => ({ value: b.id, label: b.name, hint: b.accountNo }))
+              : []),
+          ]}
+          value={h.method === "Cash" ? "cash" : h.bankAccountId}
+          disabled={!h.method}
+          placeholder={h.method ? "Select…" : "Choose the method first"}
+          onChange={(v) => {
+            if (v === "cash") {
+              set("method", "Cash");
+              set("bankAccountId", null);
+            } else set("bankAccountId", v);
+          }}
+        />
+        {h.method && h.method !== "Cash" && !banks.length && (
+          <p className="mt-1 text-[11px] text-destructive">
+            Add your bank account (e.g. Turnkey Publishers) under Accounts → Bank Accounts first.
+          </p>
+        )}
+      </Field>
       {h.method === "Cheque" && (
         <TextField
           label="Cheque no."
@@ -597,6 +722,101 @@ function MoneyFields({
       )}
       {extraFields}
     </div>
+  );
+}
+
+/** Itemised expense voucher (#, description, amount); optional — leave empty for a single amount. */
+function ExpenseItems({
+  lines,
+  setLine,
+  addLine,
+  remove,
+  onTotal,
+}: {
+  lines: EditorLine[];
+  setLine: (k: string, p: Partial<EditorLine>) => void;
+  addLine: () => void;
+  remove: (k: string) => void;
+  onTotal: (total: number) => void;
+}) {
+  const total = round2(lines.reduce((x, l) => x + (l.rate ?? 0), 0));
+  useEffect(() => {
+    if (lines.some((l) => (l.rate ?? 0) > 0)) onTotal(total);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [total]);
+  return (
+    <Section
+      title="Expense details (optional)"
+      action={
+        <Button type="button" size="sm" variant="outline" onClick={addLine}>
+          <Plus />
+          Add item
+        </Button>
+      }
+    >
+      <table className="w-full text-sm">
+        <thead className="bg-muted/50">
+          <tr>
+            <th className={`${th} w-10`}>#</th>
+            <th className={th}>Description</th>
+            <th className={`${th} w-40 text-right`}>Amount (PKR)</th>
+            <th className="w-10" />
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l, i) => (
+            <tr key={l.key} className="border-t">
+              <td className={`${td} pt-3`}>{i + 1}</td>
+              <td className={td}>
+                <Input
+                  aria-label={`Item ${i + 1} description`}
+                  value={l.description ?? ""}
+                  onChange={(e) => setLine(l.key, { description: e.target.value })}
+                />
+              </td>
+              <td className={td}>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  className="text-right"
+                  aria-label={`Item ${i + 1} amount`}
+                  value={l.rate || ""}
+                  onChange={(e) => setLine(l.key, { rate: num(e.target.value), qty: 1 })}
+                />
+              </td>
+              <td className={td}>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  aria-label="Remove item"
+                  onClick={() => remove(l.key)}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </td>
+            </tr>
+          ))}
+          {!lines.length && (
+            <tr>
+              <td colSpan={4} className="p-3 text-center text-xs text-muted-foreground">
+                One amount is enough for a simple expense. Add items to break it down on the
+                voucher.
+              </td>
+            </tr>
+          )}
+          {lines.length > 0 && (
+            <tr className="border-t font-semibold">
+              <td />
+              <td className={`${td} text-right`}>Total</td>
+              <td className={`${td} text-right tabular-nums`}>{formatAmount(total)}</td>
+              <td />
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </Section>
   );
 }
 
@@ -851,19 +1071,29 @@ function ReturnLines({
   lines,
   setLine,
   priced,
+  withCondition,
 }: {
   lines: EditorLine[];
   setLine: (k: string, p: Partial<EditorLine>) => void;
   priced: boolean;
+  withCondition?: boolean;
 }) {
   return (
     <Section title="Quantities returned">
+      {withCondition && (
+        <p className="border-b bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          Mark each returned book as <b>Saleable</b> (goes back into stock) or <b>Damaged</b>{" "}
+          (customer is credited, but the books go to the Damaged Stock register, not saleable
+          stock).
+        </p>
+      )}
       <table className="w-full min-w-[640px] text-sm">
         <thead className="bg-muted/50">
           <tr>
             <th className={th}>Item</th>
             <th className={`${th} w-28`}>Can return</th>
             <th className={`${th} w-28`}>Return qty</th>
+            {withCondition && <th className={`${th} w-36`}>Condition</th>}
             {priced && (
               <>
                 <th className={`${th} w-28`}>Rate</th>
@@ -891,6 +1121,21 @@ function ReturnLines({
                   }
                 />
               </td>
+              {withCondition && (
+                <td className={td}>
+                  <select
+                    aria-label="Condition"
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                    value={String(l.extra?.["condition"] ?? "Saleable")}
+                    onChange={(e) =>
+                      setLine(l.key, { extra: { ...(l.extra ?? {}), condition: e.target.value } })
+                    }
+                  >
+                    <option>Saleable</option>
+                    <option>Damaged</option>
+                  </select>
+                </td>
+              )}
               {priced && (
                 <>
                   <td className={`${td} pt-3 tabular-nums`}>

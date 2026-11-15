@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { getDb, type Tx } from "../db/client";
 import * as t from "../db/schema";
 import { writeAudit } from "../audit";
@@ -41,7 +41,7 @@ async function writeLines(
 }
 
 /** Creates a draft (auto-approving types are posted immediately). */
-export async function createDocument(user: SessionUser, input: DocInput) {
+export async function createDocument(user: SessionUser, input: DocInput, approveNow = false) {
   const def = DOC_DEFS[input.type];
   assertPerm(user, def.createPerm);
   return getDb().transaction(async (tx) => {
@@ -60,7 +60,7 @@ export async function createDocument(user: SessionUser, input: DocInput) {
       ref: docNo,
       details: { total: doc!.total },
     });
-    if (def.autoApprove) await approveInTx(tx, user, doc!.id);
+    if (def.autoApprove || approveNow) await approveInTx(tx, user, doc!.id);
     return { id: doc!.id, docNo, warnings: prepared.warnings };
   });
 }
@@ -71,8 +71,16 @@ export async function updateDraft(user: SessionUser, id: string, input: DocInput
     const def = DOC_DEFS[doc.type];
     assertPerm(user, def.createPerm);
     if (doc.type !== input.type) fail("Document type cannot change.");
-    if (doc.status !== "Draft")
-      fail(`${doc.docNo} is ${doc.status.toLowerCase()} and can no longer be edited.`);
+    if (doc.status === "Pending") {
+      // Editing something awaiting approval takes it back to draft; it must be submitted again.
+      await tx
+        .update(t.documents)
+        .set({ status: "Draft", submittedBy: null, submittedAt: null })
+        .where(eq(t.documents.id, id));
+    } else if (doc.status !== "Draft")
+      fail(
+        `${doc.docNo} is ${doc.status.toLowerCase()} and can no longer be edited.${doc.status === "Approved" ? " Cancel it (the postings are reversed) and enter a corrected one." : ""}`,
+      );
     const prepared = await prepareDocument(tx, input, id);
     if (prepared.header.fyId !== doc.fyId)
       fail("The date must stay within the same financial year; cancel and re-enter instead.");
@@ -182,6 +190,38 @@ export async function cancelDocument(user: SessionUser, id: string, reason: stri
     if (doc.status === "Approved") {
       assertPerm(user, "docs.cancel");
       await fyForDate(tx, doc.date);
+      if (doc.type === "SI") {
+        // An order recorded from this invoice is only a mirror of it; it goes with the invoice.
+        const orders = await tx
+          .select({ id: t.documents.id, docNo: t.documents.docNo })
+          .from(t.documents)
+          .where(
+            and(
+              eq(t.documents.type, "SO"),
+              eq(t.documents.refDocId, id),
+              ne(t.documents.status, "Cancelled"),
+            ),
+          )
+          .for("update");
+        for (const o of orders) {
+          await tx
+            .update(t.documents)
+            .set({
+              status: "Cancelled",
+              cancelledBy: user.id,
+              cancelledAt: new Date(),
+              cancelReason: `Invoice ${doc.docNo} cancelled: ${reason.trim()}`,
+            })
+            .where(eq(t.documents.id, o.id));
+          await writeAudit(tx, actor(user), {
+            action: "Cancelled",
+            entity: DOC_DEFS.SO.label,
+            entityId: o.id,
+            ref: o.docNo,
+            details: { reason: `Invoice ${doc.docNo} cancelled` },
+          });
+        }
+      }
       const lines = await tx
         .select()
         .from(t.documentLines)
@@ -219,4 +259,37 @@ export function visibleTypes(user: SessionUser): DocType[] {
       return user.permissions.has("hr.salary_view");
     return user.permissions.has("reports.view");
   });
+}
+
+/** Invoice-first workflow: records a sales order for an approved invoice (no stock or ledger effect). */
+export async function orderFromInvoice(user: SessionUser, invoiceId: string) {
+  assertPerm(user, DOC_DEFS.SO.createPerm);
+  const [inv] = await getDb().select().from(t.documents).where(eq(t.documents.id, invoiceId));
+  if (!inv || inv.type !== "SI") fail("Invoice not found.");
+  const lines = await getDb()
+    .select()
+    .from(t.documentLines)
+    .where(eq(t.documentLines.documentId, invoiceId))
+    .orderBy(t.documentLines.lineNo);
+  return createDocument(
+    user,
+    {
+      type: "SO",
+      date: inv!.date,
+      partyId: inv!.partyId,
+      refDocId: inv!.id,
+      reference: inv!.reference || inv!.docNo,
+      narration: inv!.narration,
+      discount: inv!.discount,
+      taxPct: inv!.taxPct,
+      lines: lines.map((l) => ({
+        productId: l.productId,
+        description: l.description,
+        qty: l.qty,
+        rate: l.rate,
+        discountPct: l.discountPct,
+      })),
+    },
+    true,
+  );
 }

@@ -3,7 +3,7 @@ import { MasterPage } from "@/components/masters/MasterPage";
 import { StockMovement } from "@/components/reports/Ledger";
 import { PriceHistory } from "@/components/masters/PriceHistory";
 import { formatPKR } from "@/lib/format";
-import { PRODUCT_CATEGORIES } from "@/shared/masters";
+import { ManageCategoriesButton } from "@/components/masters/CategoryManager";
 
 export const Route = createFileRoute("/_authenticated/inventory/books")({
   head: () => ({ meta: [{ title: "Books & Products – MFAHH" }] }),
@@ -15,13 +15,18 @@ export const Route = createFileRoute("/_authenticated/inventory/books")({
       singular="Book / Product"
       editPerm="books.manage"
       fields={[
-        { key: "code", label: "Book code / SKU", required: true },
+        {
+          key: "code",
+          label: "Book code / SKU",
+          placeholder: "Auto",
+          help: "Leave blank: generated automatically",
+        },
         { key: "name", label: "Title", required: true },
         {
           key: "category",
           label: "Category",
-          type: "select",
-          options: PRODUCT_CATEGORIES,
+          type: "category",
+          categoryKind: "product",
           required: true,
         },
         { key: "subject", label: "Subject" },
@@ -35,6 +40,7 @@ export const Route = createFileRoute("/_authenticated/inventory/books")({
       columns={[
         { key: "code", header: "Code" },
         { key: "name", header: "Title" },
+        { key: "category", header: "Category" },
         { key: "className", header: "Class" },
         { key: "subject", header: "Subject" },
         { key: "edition", header: "Edition" },
@@ -43,6 +49,7 @@ export const Route = createFileRoute("/_authenticated/inventory/books")({
         { key: "stockValue", header: "Stock value", kind: "money" },
         { key: "stockStatus", header: "Stock", kind: "badge" },
       ]}
+      headerActions={<ManageCategoriesButton kinds={["product"]} />}
       filters={[
         { key: "category", label: "Categories" },
         { key: "className", label: "Classes" },

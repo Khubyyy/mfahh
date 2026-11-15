@@ -45,10 +45,12 @@ export function TextField({
   placeholder,
   min,
   step,
+  list,
 }: {
   label: string;
   value: string | number | null | undefined;
   onChange: (v: string) => void;
+  list?: string;
   type?: string;
   required?: boolean;
   className?: string;
@@ -76,6 +78,7 @@ export function TextField({
         onChange={(e) => onChange(e.target.value)}
         {...(min !== undefined ? { min } : {})}
         {...(step !== undefined ? { step } : {})}
+        {...(list ? { list } : {})}
       />
     </Field>
   );

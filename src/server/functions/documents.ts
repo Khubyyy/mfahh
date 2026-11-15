@@ -9,6 +9,7 @@ import {
   approveDocument,
   cancelDocument,
   createDocument,
+  orderFromInvoice,
   rejectDocument,
   submitDocument,
   updateDraft,
@@ -125,7 +126,9 @@ export const listDocuments = createServerFn({ method: "GET" })
             d.type === "SI" || d.type === "PI"
               ? payStatus(d, today)
               : d.type === "SO"
-                ? deliveryStatus(d.status, [{ qty: agg.qty, doneQty: agg.done }])
+                ? d.refDocId && d.status !== "Cancelled"
+                  ? "Invoiced"
+                  : deliveryStatus(d.status, [{ qty: agg.qty, doneQty: agg.done }])
                 : d.type === "SMP"
                   ? sampleStatus(
                       d.status,
@@ -176,6 +179,11 @@ export const listDocuments = createServerFn({ method: "GET" })
             condition: (d.extra["condition"] as string) ?? null,
             loanType: (d.extra["loanType"] as string) ?? null,
             installment: (d.extra["installment"] as number) ?? null,
+            fromInvoice: (d.extra["fromInvoice"] as string) ?? null,
+            paidTo: (d.extra["paidTo"] as string) ?? null,
+            department: (d.extra["department"] as string) ?? null,
+            chequeNo: d.chequeNo,
+            createdBy: d.createdBy,
           };
         }),
       );
@@ -190,7 +198,14 @@ export interface DocumentDetail {
   stock: Row[];
   history: Row[];
   related: Row[];
-  can: { edit: boolean; submit: boolean; approve: boolean; reject: boolean; cancel: boolean };
+  can: {
+    edit: boolean;
+    toOrder: boolean;
+    submit: boolean;
+    approve: boolean;
+    reject: boolean;
+    cancel: boolean;
+  };
 }
 
 export const getDocument = createServerFn({ method: "GET" })
@@ -381,7 +396,16 @@ export const getDocument = createServerFn({ method: "GET" })
         history: toRows(history),
         related: toRows(related.map((r) => ({ ...r, typeLabel: DOC_DEFS[r.type].label }))),
         can: {
-          edit: open && d.status === "Draft" && user.permissions.has(def.createPerm),
+          edit:
+            open &&
+            (d.status === "Draft" || d.status === "Pending") &&
+            user.permissions.has(def.createPerm),
+          toOrder:
+            open &&
+            d.type === "SI" &&
+            d.status === "Approved" &&
+            user.permissions.has(DOC_DEFS.SO.createPerm) &&
+            !related.some((r) => r.type === "SO" && r.status !== "Cancelled"),
           submit:
             open &&
             d.status === "Draft" &&
@@ -410,6 +434,50 @@ export const saveDocument = createServerFn({ method: "POST" })
     safe(async () => {
       const user = await requireUser();
       return data.id ? updateDraft(user, data.id, data.input) : createDocument(user, data.input);
+    }),
+  );
+
+/** Invoice-first workflow: record a sales order for an approved invoice (no duplicate postings). */
+export const convertInvoiceToOrder = createServerFn({ method: "POST" })
+  .validator(z.object({ invoiceId: z.string().uuid() }))
+  .handler(({ data }) => safe(async () => orderFromInvoice(await requireUser(), data.invoiceId)));
+
+/** Damaged / unsaleable stock: write-offs plus damaged goods received back from customers. */
+export const damagedRegister = createServerFn({ method: "GET" })
+  .validator(
+    z.object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await requireUser();
+      assertPerm(user, "inventory.manage", "inventory.approve", "reports.view", "sales.approve");
+      const rows = await getDb().execute<Record<string, string>>(sql`
+        select d.id, d.date::text date, d.doc_no, d.type, p.code, p.name, l.qty, coalesce(l.unit_cost, 0) unit_cost,
+          case when d.type = 'SR' then 'Customer return (damaged)' else coalesce(d.extra->>'condition', '') end source,
+          coalesce(d.extra->>'reason', '') reason, c.name customer
+        from documents d join document_lines l on l.document_id = d.id join products p on p.id = l.product_id
+        left join customers c on c.id = d.party_id and d.party_type = 'customer'
+        where d.status = 'Approved' and d.date between ${data.from} and ${data.to}
+          and (d.type = 'DMG' or (d.type = 'SR' and l.extra->>'condition' = 'Damaged'))
+        order by d.date desc, d.doc_no desc, l.line_no`);
+      return toRows(
+        rows.map((r) => ({
+          id: r["id"],
+          date: r["date"],
+          docNo: r["doc_no"],
+          type: r["type"],
+          product: r["name"],
+          code: r["code"],
+          qty: Number(r["qty"]),
+          value: round2(Number(r["qty"]) * Number(r["unit_cost"])),
+          source: r["source"],
+          reason: r["reason"],
+          customer: r["customer"] ?? "",
+        })),
+      );
     }),
   );
 

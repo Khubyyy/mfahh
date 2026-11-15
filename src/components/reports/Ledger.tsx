@@ -189,8 +189,16 @@ export function PartyStatement({
   );
 }
 
-export function StockMovement({ productId }: { productId: string }) {
-  const p = usePeriod();
+export function StockMovement({
+  productId,
+  period,
+}: {
+  productId: string;
+  /** Shared period from a parent report; otherwise this table has its own date range. */
+  period?: ReturnType<typeof usePeriod>;
+}) {
+  const own = usePeriod();
+  const p = period ?? own;
   const [viewId, setViewId] = useState<string | null>(null);
   const q = useApi(
     ["stock-movement", productId, p.from, p.to],
@@ -199,7 +207,7 @@ export function StockMovement({ productId }: { productId: string }) {
   );
   return (
     <div className="space-y-3">
-      <DateRangeInputs from={p.from} to={p.to} onChange={p.setRange} />
+      {!period && <DateRangeInputs from={p.from} to={p.to} onChange={p.setRange} />}
       {q.data && (
         <>
           <p className="text-sm">
@@ -223,15 +231,23 @@ export function StockMovement({ productId }: { productId: string }) {
                 key: "docNo",
                 header: "Document",
                 value: (r) => s(r, "docNo"),
-                render: (r) => (
-                  <span className="font-medium text-primary">
-                    {s(r, "docNo")}{" "}
-                    <span className="text-[11px] text-muted-foreground">
-                      {DOC_DEFS[s(r, "type") as DocType]?.label}
-                      {r["reversal"] ? " (reversal)" : ""}
-                    </span>
-                  </span>
-                ),
+                render: (r) => <span className="font-medium text-primary">{s(r, "docNo")}</span>,
+              },
+              {
+                key: "movement",
+                header: "Movement",
+                value: (r) =>
+                  s(r, "movement") || (DOC_DEFS[s(r, "type") as DocType]?.label ?? s(r, "type")),
+              },
+              {
+                key: "party",
+                header: "Customer / supplier",
+                value: (r) => s(r, "party"),
+              },
+              {
+                key: "reference",
+                header: "Reference",
+                value: (r) => s(r, "reference"),
               },
               {
                 key: "qtyIn",

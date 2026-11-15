@@ -36,6 +36,8 @@ import {
 } from "@/server/functions/masters";
 import type { Permission } from "@/shared/permissions";
 import { useQueryClient } from "@tanstack/react-query";
+import { CategorySelect } from "./CategoryManager";
+import type { CategoryKind } from "@/shared/masters";
 
 export type Row = Record<string, string | number | boolean | null>;
 const s = (r: Row, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
@@ -52,7 +54,15 @@ export interface FieldDef {
     | "textarea"
     | "account"
     | "groupAccount"
-    | "checkbox";
+    | "checkbox"
+    | "category";
+  /** For type "category": which user-managed list supplies the options. */
+  categoryKind?: CategoryKind;
+  /** Only shown when this returns true for the current form values. */
+  showWhen?: (values: Row) => boolean;
+  placeholder?: string;
+  /** Small help text under the field. */
+  help?: string;
   options?: readonly string[];
   required?: boolean;
   /** Only shown/editable with this permission. */
@@ -85,6 +95,8 @@ export interface MasterPageProps {
   tabs?: (row: Row) => { id: string; label: string; content: ReactNode }[];
   filters?: { key: string; label: string }[];
   headerExtra?: ReactNode;
+  /** Extra buttons next to "New …" (e.g. Manage categories). */
+  headerActions?: ReactNode;
 }
 
 export function MasterPage({
@@ -100,6 +112,7 @@ export function MasterPage({
   tabs,
   filters = [],
   headerExtra,
+  headerActions,
 }: MasterPageProps) {
   const { can } = useSession();
   const q = useApi(["masters", entity], () => listMasters({ data: { entity } }));
@@ -195,12 +208,15 @@ export function MasterPage({
         title={title}
         crumbs={["Home", section, ...(section !== title ? [title] : [])]}
         actions={
-          canEdit && (
-            <Button onClick={() => setEditing(null)}>
-              <Plus />
-              New {singular}
-            </Button>
-          )
+          <>
+            {headerActions}
+            {canEdit && (
+              <Button onClick={() => setEditing(null)}>
+                <Plus />
+                New {singular}
+              </Button>
+            )}
+          </>
         }
       />
       <div
@@ -314,6 +330,8 @@ function MasterForm({
   const { can } = useSession();
   const { data: lk } = useLookups();
   const qc = useQueryClient();
+  const firstCategory = (kind?: CategoryKind) =>
+    (lk?.categories ?? []).find((c) => c.kind === kind && c.status === "Active")?.name ?? "";
   const [values, setValues] = useState<Row>(() =>
     record
       ? { ...record }
@@ -327,7 +345,9 @@ function MasterForm({
                   ? false
                   : f.type === "select"
                     ? (f.options?.[0] ?? "")
-                    : "",
+                    : f.type === "category"
+                      ? firstCategory(f.categoryKind)
+                      : "",
             ]),
           ),
           ...defaults,
@@ -347,9 +367,13 @@ function MasterForm({
           .filter((f) => !f.perm || can(f.perm))
           .map((f) => [
             f.key,
-            f.type === "number"
-              ? Number(values[f.key] ?? 0)
-              : (values[f.key] ?? (f.type === "checkbox" ? false : "")),
+            f.showWhen && !f.showWhen(values)
+              ? f.type === "number"
+                ? 0
+                : ""
+              : f.type === "number"
+                ? Number(values[f.key] ?? 0)
+                : (values[f.key] ?? (f.type === "checkbox" ? false : "")),
           ]),
       );
       await saveMaster({ data: { entity, id: record ? s(record, "id") : null, values: payload } });
@@ -378,11 +402,23 @@ function MasterForm({
         >
           <div className="grid gap-4 sm:grid-cols-2">
             {fields
-              .filter((f) => !f.perm || can(f.perm))
+              .filter((f) => (!f.perm || can(f.perm)) && (!f.showWhen || f.showWhen(values)))
               .map((f) => {
                 const locked = Boolean(record && f.lockWhen?.(record));
                 const v = values[f.key];
                 const cls = f.wide || f.type === "textarea" ? "sm:col-span-2" : "";
+                if (f.type === "category" && f.categoryKind)
+                  return (
+                    <CategorySelect
+                      key={f.key}
+                      className={cls}
+                      kind={f.categoryKind}
+                      label={f.label}
+                      required={f.required}
+                      value={String(v ?? "")}
+                      onChange={(x) => set(f.key, x)}
+                    />
+                  );
                 if (f.type === "select")
                   return (
                     <SelectField
@@ -447,18 +483,20 @@ function MasterForm({
                   );
                 }
                 return (
-                  <TextField
-                    key={f.key}
-                    className={cls}
-                    label={f.label}
-                    required={f.required}
-                    disabled={locked}
-                    type={f.type ?? "text"}
-                    min={f.type === "number" ? 0 : undefined}
-                    step={f.type === "number" ? "any" : undefined}
-                    value={v as string | number}
-                    onChange={(x) => set(f.key, x)}
-                  />
+                  <div key={f.key} className={cls}>
+                    <TextField
+                      label={f.label}
+                      required={f.required}
+                      disabled={locked}
+                      type={f.type ?? "text"}
+                      min={f.type === "number" ? 0 : undefined}
+                      step={f.type === "number" ? "any" : undefined}
+                      placeholder={f.placeholder}
+                      value={v as string | number}
+                      onChange={(x) => set(f.key, x)}
+                    />
+                    {f.help && <p className="mt-1 text-[11px] text-muted-foreground">{f.help}</p>}
+                  </div>
                 );
               })}
           </div>
@@ -505,6 +543,7 @@ function MasterView({
       const a = lk?.accounts.find((x) => x.id === v);
       return a ? `${a.code} ${a.name}` : "—";
     }
+    if (f.key === "discountPct") return `${Number(v ?? 0)}%`;
     if (f.type === "number")
       return f.key.toLowerCase().includes("price") ||
         ["creditLimit", "basic", "allowances", "deductions"].includes(f.key)
@@ -569,7 +608,7 @@ function MasterView({
             )}
             <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
               {fields
-                .filter((f) => !f.perm || can(f.perm))
+                .filter((f) => (!f.perm || can(f.perm)) && (!f.showWhen || f.showWhen(row)))
                 .map((f) => (
                   <div
                     key={f.key}

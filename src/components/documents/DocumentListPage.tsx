@@ -1,5 +1,14 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Plus, ClipboardList, Clock, Wallet, AlertTriangle } from "lucide-react";
+import {
+  Plus,
+  ClipboardList,
+  Clock,
+  Wallet,
+  AlertTriangle,
+  Eye,
+  Pencil,
+  Printer,
+} from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { KpiCard } from "@/components/shared/KpiCard";
@@ -48,7 +57,11 @@ export type ColKey =
   | "qty"
   | "narration"
   | "condition"
-  | "loanType";
+  | "loanType"
+  | "paidTo"
+  | "fromInvoice"
+  | "receivedAs"
+  | "billNo";
 
 const COLS: Record<ColKey, Column<Row>> = {
   docNo: {
@@ -129,7 +142,24 @@ const COLS: Record<ColKey, Column<Row>> = {
   },
   condition: { key: "condition", header: "Condition", value: (r) => s(r, "condition") },
   loanType: { key: "loanType", header: "Type", value: (r) => s(r, "loanType") },
+  paidTo: { key: "paidTo", header: "Paid to", value: (r) => s(r, "paidTo") },
+  billNo: { key: "billNo", header: "Bill / inv. no.", value: (r) => s(r, "reference") },
+  fromInvoice: { key: "fromInvoice", header: "From invoice", value: (r) => s(r, "fromInvoice") },
+  receivedAs: {
+    key: "receivedAs",
+    header: "Description",
+    value: (r) => receiptDescription(r),
+  },
 };
+
+/** "Cash Received", "Online Received", "Cheque Received # 00154054" — as on the receipts register. */
+export function receiptDescription(r: Row) {
+  const m = s(r, "method");
+  if (m === "Cheque") return `Cheque Received${r["chequeNo"] ? ` # ${s(r, "chequeNo")}` : ""}`;
+  if (m === "Online") return "Online Received";
+  if (m === "Bank") return "Bank Deposit Received";
+  return m ? `${m} Received` : "";
+}
 
 export interface DocumentListProps {
   title: string;
@@ -140,6 +170,10 @@ export interface DocumentListProps {
   columns: ColKey[];
   extraHeader?: ReactNode;
   initialFrom?: string;
+  /** Dropdown filters on row fields, e.g. [{ key: "expenseHead", label: "Expense heads" }]. */
+  filters?: { key: string; label: string }[];
+  /** Extra buttons in the page header. */
+  headerActions?: ReactNode;
 }
 
 export function DocumentListPage({
@@ -150,6 +184,8 @@ export function DocumentListPage({
   columns,
   extraHeader,
   initialFrom,
+  filters = [],
+  headerActions,
 }: DocumentListProps) {
   const { can } = useSession();
   const { data: lk } = useLookups();
@@ -162,6 +198,8 @@ export function DocumentListPage({
   const to = range?.to ?? today;
   const [filter, setFilter] = useState("All");
   const [viewId, setViewId] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [filterValues, setFilterValues] = useState<Record<string, string>>({});
   const [newType, setNewType] = useState<DocInput["type"] | null>(null);
 
   const q = useApi(
@@ -174,7 +212,62 @@ export function DocumentListPage({
     () => ["All", ...new Set(all.map((r) => s(r, "progress")).filter(Boolean))],
     [all],
   );
-  const rows = filter === "All" ? all : all.filter((r) => s(r, "progress") === filter);
+  const rows = all.filter(
+    (r) =>
+      (filter === "All" || s(r, "progress") === filter) &&
+      filters.every(
+        (f) =>
+          !filterValues[f.key] ||
+          filterValues[f.key] === "All" ||
+          s(r, f.key) === filterValues[f.key],
+      ),
+  );
+  const actionCol: Column<Row> = {
+    key: "actions",
+    header: "Actions",
+    value: () => "",
+    render: (r) => {
+      const t = s(r, "type") as DocType;
+      const editable =
+        (r["status"] === "Draft" || r["status"] === "Pending") && can(DOC_DEFS[t].createPerm);
+      return (
+        <div className="flex gap-0.5" onClick={(e) => e.stopPropagation()}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            title="Review"
+            aria-label={`Review ${s(r, "docNo")}`}
+            onClick={() => setViewId(s(r, "id"))}
+          >
+            <Eye className="size-4" />
+          </Button>
+          {editable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title={r["status"] === "Pending" ? "Edit (returns it to draft)" : "Edit"}
+              aria-label={`Edit ${s(r, "docNo")}`}
+              onClick={() => setEditId(s(r, "id"))}
+            >
+              <Pencil className="size-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            title="Print / PDF"
+            aria-label={`Print ${s(r, "docNo")}`}
+            onClick={() => window.open(`/print/${s(r, "id")}`, "_blank", "noopener")}
+          >
+            <Printer className="size-4" />
+          </Button>
+        </div>
+      );
+    },
+  };
   const creatable = create.filter((t) => can(DOC_DEFS[t].createPerm));
   const active = all.filter((r) => r["status"] !== "Cancelled");
   const totalValue = active
@@ -191,16 +284,21 @@ export function DocumentListPage({
       <PageHeader
         title={title}
         crumbs={["Home", section, ...(section !== title ? [title] : [])]}
-        actions={creatable.map((t) => (
-          <Button
-            key={t}
-            onClick={() => setNewType(t)}
-            variant={t === creatable[0] ? "default" : "outline"}
-          >
-            <Plus />
-            New {DOC_DEFS[t].label}
-          </Button>
-        ))}
+        actions={
+          <>
+            {headerActions}
+            {creatable.map((t) => (
+              <Button
+                key={t}
+                onClick={() => setNewType(t)}
+                variant={t === creatable[0] ? "default" : "outline"}
+              >
+                <Plus />
+                New {DOC_DEFS[t].label}
+              </Button>
+            ))}
+          </>
+        }
       />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <KpiCard
@@ -267,6 +365,26 @@ export function DocumentListPage({
               ))}
             </SelectContent>
           </Select>
+          {filters.map((f) => (
+            <Select
+              key={f.key}
+              value={filterValues[f.key] ?? "All"}
+              onValueChange={(v) => setFilterValues({ ...filterValues, [f.key]: v })}
+            >
+              <SelectTrigger className="w-52" aria-label={f.label}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["All", ...[...new Set(all.map((r) => s(r, f.key)).filter(Boolean))].sort()].map(
+                  (x) => (
+                    <SelectItem key={x} value={x}>
+                      {x === "All" ? `All ${f.label.toLowerCase()}` : x}
+                    </SelectItem>
+                  ),
+                )}
+              </SelectContent>
+            </Select>
+          ))}
         </div>
         {q.isLoading ? (
           <p className="py-8 text-center text-muted-foreground">Loading…</p>
@@ -275,11 +393,29 @@ export function DocumentListPage({
             rows={rows}
             exportName={title.toLowerCase().replace(/\W+/g, "-")}
             onRowClick={(r) => setViewId(s(r, "id"))}
-            columns={columns.map((c) => COLS[c])}
+            columns={[...columns.map((c) => COLS[c]), actionCol]}
+            footer={
+              rows.length > 0 ? (
+                <tr>
+                  <td colSpan={columns.length + 1} className="py-2 text-right text-sm">
+                    Total of {rows.filter((r) => r["status"] !== "Cancelled").length} shown (excl.
+                    cancelled):{" "}
+                    <b className="tabular-nums">
+                      {formatPKR(
+                        rows
+                          .filter((r) => r["status"] !== "Cancelled")
+                          .reduce((x, r) => x + Number(r["total"] ?? 0), 0),
+                      )}
+                    </b>
+                  </td>
+                </tr>
+              ) : undefined
+            }
           />
         )}
       </section>
       {viewId && <DocumentView id={viewId} onClose={() => setViewId(null)} />}
+      {editId && <DocumentView id={editId} startEditing onClose={() => setEditId(null)} />}
       {newType && (
         <DocumentEditor
           type={newType}

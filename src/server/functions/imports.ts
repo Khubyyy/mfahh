@@ -4,14 +4,14 @@
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "../db/client";
 import * as t from "../db/schema";
 import { writeAudit } from "../audit";
 import { assertPerm, requireUser } from "../security/session";
 import { createDocument } from "../posting/engine";
 import { safe } from "./_safe";
-import { CUSTOMER_CATEGORIES, PRODUCT_CATEGORIES, SUPPLIER_CATEGORIES } from "@/shared/masters";
+
 import type { Permission } from "@/shared/permissions";
 
 const cell = z.union([z.string(), z.number(), z.null()]).optional();
@@ -54,6 +54,23 @@ export const importMasters = createServerFn({ method: "POST" })
       const existing = new Set(
         (await db.select({ code: table.code }).from(table)).map((r) => r.code.toLowerCase()),
       );
+      const catList = async (kind: string) =>
+        (
+          await db
+            .select({ name: t.categories.name, status: t.categories.status })
+            .from(t.categories)
+            .where(eq(t.categories.kind, kind as "product"))
+        )
+          .filter((c) => c.status === "Active")
+          .map((c) => c.name);
+      const cats = await catList(
+        data.entity === "products"
+          ? "product"
+          : data.entity === "customers"
+            ? "customer"
+            : "supplier",
+      );
+      const locations = data.entity === "customers" ? await catList("customerLocation") : [];
       const seen = new Set<string>();
       const errors: RowError[] = [];
       const values: Record<string, unknown>[] = [];
@@ -70,9 +87,12 @@ export const importMasters = createServerFn({ method: "POST" })
           return errors.push({ row, message: `Code ${code} appears twice in the file` });
         seen.add(code.toLowerCase());
         if (data.entity === "products") {
-          const category = pickCategory(str(r["category"]), PRODUCT_CATEGORIES, "Textbook");
+          const category = pickCategory(str(r["category"]), cats, cats[0] ?? "Other");
           if (!category)
-            return errors.push({ row, message: `Unknown category "${str(r["category"])}"` });
+            return errors.push({
+              row,
+              message: `Unknown category "${str(r["category"])}". Add it under Manage categories, or use one of: ${cats.join(", ")}`,
+            });
           const costPrice = num(r["costPrice"]),
             salePrice = num(r["salePrice"]),
             minStock = num(r["minStock"]);
@@ -95,13 +115,29 @@ export const importMasters = createServerFn({ method: "POST" })
             createdBy: user.id,
           });
         } else {
-          const cats = data.entity === "customers" ? CUSTOMER_CATEGORIES : SUPPLIER_CATEGORIES;
           const category = pickCategory(str(r["category"]), cats, "Other");
           if (!category)
             return errors.push({
               row,
-              message: `Unknown category "${str(r["category"])}". Use one of: ${cats.join(", ")}`,
+              message: `Unknown category "${str(r["category"])}". Add it under Manage categories, or use one of: ${cats.join(", ")}`,
             });
+          const city = str(r["city"]);
+          const location =
+            data.entity === "customers"
+              ? pickCategory(
+                  str(r["location"]),
+                  locations,
+                  !city || city.toLowerCase().includes("karachi") ? "Karachi" : "Outside Karachi",
+                )
+              : null;
+          if (data.entity === "customers" && !location)
+            return errors.push({
+              row,
+              message: `Unknown location "${str(r["location"])}". Use one of: ${locations.join(", ")}`,
+            });
+          const discountPct = num(r["discountPct"]);
+          if (!Number.isFinite(discountPct) || discountPct < 0 || discountPct > 100)
+            return errors.push({ row, message: "Discount % must be between 0 and 100" });
           const creditDays = num(r["creditDays"]);
           if (!Number.isInteger(creditDays) || creditDays < 0)
             return errors.push({ row, message: "Credit days must be a whole number" });
@@ -120,7 +156,7 @@ export const importMasters = createServerFn({ method: "POST" })
             ntn: str(r["ntn"]),
             creditDays,
             ...(data.entity === "customers"
-              ? { creditLimit: Math.max(0, num(r["creditLimit"])) }
+              ? { creditLimit: Math.max(0, num(r["creditLimit"])), location, discountPct }
               : {}),
             createdBy: user.id,
           });

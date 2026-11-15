@@ -63,7 +63,7 @@ export const docInputSchema = z.object({
   dueDate: isoDate.nullish(),
   refDocId: uuid.nullish(),
   reference: z.string().max(200).optional(),
-  method: z.enum(["Cash", "Bank", "Cheque"]).nullish(),
+  method: z.enum(["Cash", "Bank", "Cheque", "Online"]).nullish(),
   bankAccountId: uuid.nullish(),
   chequeNo: z.string().max(50).optional(),
   expenseHeadId: uuid.nullish(),
@@ -220,6 +220,24 @@ export async function prepareDocument(
         items.map((l) => l.productId),
       );
       let soLines = new Map<string, LineRow>();
+      if (input.type === "SO" && input.refDocId) {
+        // Order recorded after the invoice (invoice-first workflow): one order per invoice, posts nothing.
+        const inv = await refDoc(tx, input.refDocId, "SI", header.partyId);
+        const dup = await tx
+          .select({ no: t.documents.docNo })
+          .from(t.documents)
+          .where(
+            and(
+              eq(t.documents.type, "SO"),
+              eq(t.documents.refDocId, inv.doc.id),
+              ne(t.documents.status, "Cancelled"),
+              currentId ? ne(t.documents.id, currentId) : sql`true`,
+            ),
+          );
+        if (dup.length) fail(`${inv.doc.docNo} already has sales order ${dup[0]!.no}.`);
+        header.refDocId = inv.doc.id;
+        header.extra = { ...header.extra, fromInvoice: inv.doc.docNo };
+      }
       if (input.type === "SI" && input.refDocId) {
         const so = await refDoc(tx, input.refDocId, "SO", header.partyId);
         header.refDocId = so.doc.id;
@@ -311,6 +329,9 @@ export async function prepareDocument(
           fail(
             `Line ${i + 1}: only ${o.qty - o.doneQty} can still be returned against ${orig.doc.docNo}.`,
           );
+        const condition = String(l.extra?.["condition"] ?? "Saleable");
+        if (input.type === "SR" && !["Saleable", "Damaged"].includes(condition))
+          fail(`Line ${i + 1}: condition must be Saleable or Damaged.`);
         return {
           lineNo: i + 1,
           productId: o.productId,
@@ -321,6 +342,7 @@ export async function prepareDocument(
           discountPct: o.discountPct,
           amount: lineAmount({ qty, rate: o.rate, discountPct: o.discountPct }),
           refLineId: o.id,
+          ...(input.type === "SR" ? { extra: { condition } } : {}),
         };
       });
       if (input.type === "SMR") {
@@ -432,6 +454,21 @@ export async function prepareDocument(
     case "PV":
     case "EXP":
     case "LOAN": {
+      // Expense vouchers may itemise the payment; the voucher total is then the sum of the items.
+      const items =
+        input.type === "EXP"
+          ? raw.filter((l) => (l.description ?? "").trim() || (l.rate ?? 0) > 0)
+          : [];
+      if (items.length) {
+        lines = items.map((l, i) => {
+          const description =
+            (l.description ?? "").trim() || fail(`Item ${i + 1}: enter a description.`);
+          const amt = round2(l.rate ?? 0);
+          if (amt <= 0) fail(`Item ${i + 1}: enter the amount.`);
+          return { lineNo: i + 1, description, qty: 1, rate: amt, amount: amt };
+        });
+        input = { ...input, amount: round2(lines.reduce((x, l) => x + (l.amount ?? 0), 0)) };
+      }
       const amount = round2(input.amount ?? 0);
       if (amount <= 0) fail("Amount must be greater than zero.");
       Object.assign(header, await moneySource(tx, input), { subtotal: amount, total: amount });
@@ -439,7 +476,8 @@ export async function prepareDocument(
         const headId = input.expenseHeadId ?? fail("Choose an expense head.");
         const [head] = await tx.select().from(t.expenseHeads).where(eq(t.expenseHeads.id, headId));
         if (!head || head.status !== "Active") fail("The selected expense head is not active.");
-        if (!header.narration) fail("Enter a description of the expense.");
+        if (!header.narration && !lines.length) fail("Enter a description of the expense.");
+        if (!header.narration) header.narration = lines.map((l) => l.description).join("; ");
         header.expenseHeadId = headId;
       }
       if (input.type === "LOAN") {
