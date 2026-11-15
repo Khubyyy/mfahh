@@ -50,6 +50,8 @@ export const company = pgTable("company", {
   email: text("email").notNull().default(""),
   ntn: text("ntn").notNull().default(""),
   logoPath: text("logo_path"),
+  /** Company logo as a data: URL (PNG/JPEG/WebP), shown on printed documents. */
+  logoData: text("logo_data"),
   /** Feature switches, e.g. { makerChecker: true, mfaRoles: ["admin","accountant"] } */
   settings: jsonb("settings").$type<CompanySettings>().notNull().default({}),
 });
@@ -203,6 +205,28 @@ export const customers = pgTable("customers", {
   location: text("location").notNull().default("Karachi"),
 });
 export const suppliers = pgTable("suppliers", { ...party() });
+
+/**
+ * Customer discount rules. category "" is the customer's default; a named product category
+ * overrides it for books in that category. kind: pct = percent of rate, rs = rupees per item.
+ * fixed rules are enforced on invoices/orders; editable rules only pre-fill the line.
+ */
+export const customerDiscountRules = pgTable(
+  "customer_discount_rules",
+  {
+    id: id(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customers.id),
+    category: text("category").notNull().default(""),
+    kind: text("kind").$type<"pct" | "rs">().notNull().default("pct"),
+    value: money("value").notNull().default(0),
+    mode: text("mode").$type<"fixed" | "editable">().notNull().default("editable"),
+  },
+  (t) => [
+    uniqueIndex("discount_rule_customer_category").on(t.customerId, sql`lower(${t.category})`),
+  ],
+);
 
 export const products = pgTable("products", {
   id: id(),
@@ -438,6 +462,8 @@ export const documentLines = pgTable(
     discountPct: numeric("discount_pct", { precision: 6, scale: 2, mode: "number" })
       .notNull()
       .default(0),
+    /** Rupee discount per item, taken off the rate before the percentage discount. */
+    discountRs: money("discount_rs").notNull().default(0),
     amount: money("amount").notNull().default(0),
     debit: money("debit").notNull().default(0),
     credit: money("credit").notNull().default(0),

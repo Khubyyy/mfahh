@@ -13,6 +13,9 @@ import {
   docTotals,
   lineAmount,
   round2,
+  ruleDiscount,
+  ruleFor,
+  type DiscountRule,
   type DocType,
   type PartyType,
 } from "@/shared/documents";
@@ -30,6 +33,7 @@ export const lineInputSchema = z.object({
   qty: z.number().int().min(-1e7).max(1e7).optional(),
   rate: money.optional(),
   discountPct: z.number().min(0).max(100).optional(),
+  discountRs: money.optional(),
   debit: money.optional(),
   credit: money.optional(),
   refLineId: uuid.nullish(),
@@ -243,12 +247,30 @@ export async function prepareDocument(
         header.refDocId = so.doc.id;
         soLines = new Map(so.lines.map((l) => [l.id, l]));
       }
+      // Customer discount rules: fixed rules are enforced here whatever the screen sent.
+      const rules: DiscountRule[] =
+        input.type === "SMP"
+          ? []
+          : await tx
+              .select({
+                category: t.customerDiscountRules.category,
+                kind: t.customerDiscountRules.kind,
+                value: t.customerDiscountRules.value,
+                mode: t.customerDiscountRules.mode,
+              })
+              .from(t.customerDiscountRules)
+              .where(eq(t.customerDiscountRules.customerId, header.partyId!));
       lines = items.map((l, i) => {
         const p = products.get(l.productId ?? "") ?? fail(`Line ${i + 1}: choose a book.`);
         const qty = l.qty ?? 0;
         if (qty <= 0) fail(`Line ${i + 1}: quantity must be a positive whole number.`);
         const rate = input.type === "SMP" ? 0 : (l.rate ?? p.salePrice);
-        const discountPct = input.type === "SMP" ? 0 : (l.discountPct ?? 0);
+        const rule = ruleFor(rules, p.category);
+        const fixed = rule?.mode === "fixed" ? ruleDiscount(rule) : null;
+        const discountPct = input.type === "SMP" ? 0 : (fixed?.discountPct ?? l.discountPct ?? 0);
+        const discountRs = input.type === "SMP" ? 0 : (fixed?.discountRs ?? l.discountRs ?? 0);
+        if (discountRs > rate)
+          fail(`Line ${i + 1}: the rupee discount is more than the rate of ${p.name}.`);
         if (l.refLineId) {
           const so =
             soLines.get(l.refLineId) ?? fail(`Line ${i + 1}: not part of the selected order.`);
@@ -265,7 +287,8 @@ export async function prepareDocument(
           qty,
           rate,
           discountPct,
-          amount: lineAmount({ qty, rate, discountPct }),
+          discountRs,
+          amount: lineAmount({ qty, rate, discountPct, discountRs }),
           refLineId: l.refLineId ?? null,
         };
       });
@@ -284,7 +307,7 @@ export async function prepareDocument(
       const discount = input.discount ?? 0;
       const taxPct = input.taxPct ?? 0;
       const totals = docTotals(
-        lines as { qty: number; rate: number; discountPct: number }[],
+        lines as { qty: number; rate: number; discountPct: number; discountRs?: number }[],
         discount,
         taxPct,
       );
@@ -340,7 +363,13 @@ export async function prepareDocument(
           qty,
           rate: o.rate,
           discountPct: o.discountPct,
-          amount: lineAmount({ qty, rate: o.rate, discountPct: o.discountPct }),
+          discountRs: o.discountRs,
+          amount: lineAmount({
+            qty,
+            rate: o.rate,
+            discountPct: o.discountPct,
+            discountRs: o.discountRs,
+          }),
           refLineId: o.id,
           ...(input.type === "SR" ? { extra: { condition } } : {}),
         };
@@ -359,7 +388,7 @@ export async function prepareDocument(
         const discount =
           orig.doc.subtotal > 0 ? round2((orig.doc.discount * sub) / orig.doc.subtotal) : 0;
         const totals = docTotals(
-          lines as { qty: number; rate: number; discountPct: number }[],
+          lines as { qty: number; rate: number; discountPct: number; discountRs?: number }[],
           discount,
           orig.doc.taxPct,
         );
@@ -433,7 +462,7 @@ export async function prepareDocument(
       const discount = input.discount ?? 0;
       const taxPct = input.taxPct ?? 0;
       const totals = docTotals(
-        lines as { qty: number; rate: number; discountPct: number }[],
+        lines as { qty: number; rate: number; discountPct: number; discountRs?: number }[],
         discount,
         taxPct,
       );

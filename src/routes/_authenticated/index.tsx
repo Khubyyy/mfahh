@@ -34,7 +34,11 @@ import {
   AlertTriangle,
   PackageX,
   BookOpenCheck,
+  BookOpen,
+  FileText,
+  Wallet2,
 } from "lucide-react";
+import { useSession } from "@/lib/session";
 import { useUiStore, resolveRange } from "@/store/uiStore";
 import { useApi } from "@/lib/api";
 import { useLookups } from "@/lib/lookups";
@@ -113,6 +117,7 @@ function Dashboard() {
           </span>
         }
       />
+      <QuickActions />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <KpiCard
@@ -523,6 +528,59 @@ function Dashboard() {
         </ChartCard>
       )}
       {viewId && <DocumentView id={viewId} onClose={() => setViewId(null)} />}
+    </div>
+  );
+}
+
+/** Daily shortcuts: open the most used forms in one click, and the user manual. */
+function QuickActions() {
+  const { can } = useSession();
+  const items = [
+    {
+      label: "Cash receipt",
+      href: "/sales/receipts?new=RV",
+      icon: HandCoins,
+      ok: can("sales.create"),
+    },
+    {
+      label: "Cash expense",
+      href: "/transactions/expenses?new=EXP",
+      icon: Receipt,
+      ok: can("expenses.create"),
+    },
+    {
+      label: "Sales invoice",
+      href: "/sales/invoices?new=SI",
+      icon: FileText,
+      ok: can("sales.create"),
+    },
+    {
+      label: "Supplier payment",
+      href: "/purchases/payments?new=PV",
+      icon: Wallet2,
+      ok: can("purchases.create"),
+    },
+  ].filter((x) => x.ok);
+  return (
+    <div className="flex flex-wrap gap-2">
+      {items.map((x) => (
+        <a
+          key={x.label}
+          href={x.href}
+          className="inline-flex items-center gap-2 rounded-xl border bg-card px-4 py-2 text-sm font-semibold text-navy shadow-xs hover:bg-muted"
+        >
+          <x.icon className="size-4 text-primary" />
+          {x.label}
+        </a>
+      ))}
+      <a
+        href="/mfahh-user-manual.pdf"
+        download
+        className="inline-flex items-center gap-2 rounded-xl border bg-card px-4 py-2 text-sm font-semibold text-navy shadow-xs hover:bg-muted"
+      >
+        <BookOpen className="size-4 text-primary" />
+        User manual
+      </a>
     </div>
   );
 }

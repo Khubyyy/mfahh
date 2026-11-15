@@ -6,6 +6,8 @@ export interface Company {
   phone: string;
   email: string;
   ntn: string;
+  /** Uploaded logo (data URL), if any. */
+  logo?: string | null;
 }
 
 /** House print theme (blue & white), shared by vouchers, invoices and printed reports. */
@@ -15,7 +17,14 @@ export const LIGHT = "#eaf2fb";
 export const LINE = "#a9c7e8";
 
 /** MFAHH wordmark (left) and the Turnkey Publishers logo (right). */
-export function Letterhead({ compact = false }: { compact?: boolean }) {
+export function Letterhead({
+  compact = false,
+  logo,
+}: {
+  compact?: boolean;
+  /** Uploaded company logo (data URL); the built-in Turnkey logo otherwise. */
+  logo?: string | null;
+}) {
   return (
     <div className="relative z-10 flex items-center justify-between">
       <div
@@ -31,9 +40,9 @@ export function Letterhead({ compact = false }: { compact?: boolean }) {
         <span>FAHH</span>
       </div>
       <img
-        src="/turnkey-logo.png"
-        alt="Turnkey Publishers"
-        style={{ height: compact ? 44 : 64, width: "auto" }}
+        src={logo || "/turnkey-logo.png"}
+        alt="Company logo"
+        style={{ height: compact ? 44 : 64, width: "auto", maxWidth: 220, objectFit: "contain" }}
       />
     </div>
   );
@@ -185,7 +194,7 @@ export function PrintSheet({
       }}
     >
       <Swooshes />
-      <Letterhead />
+      <Letterhead logo={company?.logo} />
       <TitlePill title={title} sub={sub} />
       {status && status !== "Approved" && (
         <div

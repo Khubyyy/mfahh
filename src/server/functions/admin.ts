@@ -381,6 +381,84 @@ export const saveCompany = createServerFn({ method: "POST" })
     }),
   );
 
+/** Business tables included in the downloadable data backup (no passwords or sessions). */
+const EXPORT_TABLES = [
+  "company",
+  "financial_years",
+  "accounts",
+  "bank_accounts",
+  "expense_heads",
+  "categories",
+  "customers",
+  "customer_discount_rules",
+  "suppliers",
+  "products",
+  "price_history",
+  "documents",
+  "document_lines",
+  "allocations",
+  "gl_entries",
+  "stock_ledger",
+  "staff",
+  "attendance",
+  "leave_types",
+  "leave_applications",
+  "audit_log",
+] as const;
+
+/**
+ * Full data export as JSON, downloadable from the browser. Works on any hosting (no pg_dump
+ * needed). Keep it with the database provider's own daily backups.
+ */
+export const exportDataBackup = createServerFn({ method: "POST" }).handler(() =>
+  safe(async () => {
+    const user = await admin("backup.manage");
+    const db = getDb();
+    const tables: Record<string, unknown[]> = {};
+    for (const name of EXPORT_TABLES) {
+      tables[name] = await db.execute(sql`select * from ${sql.identifier(name)}`);
+    }
+    await writeAudit(db, user, { action: "Data backup downloaded", entity: "Backup" });
+    return JSON.stringify({ app: "MFAHH", exportedAt: new Date().toISOString(), tables });
+  }),
+);
+
+/** Company logo for printed documents (any signed-in user; it appears on every print). */
+export const getCompanyLogo = createServerFn({ method: "GET" }).handler(() =>
+  safe(async () => {
+    await requireUser();
+    const [c] = await getDb().select({ logo: t.company.logoData }).from(t.company);
+    return { logo: c?.logo ?? null };
+  }),
+);
+
+/** Upload (PNG/JPEG/WebP data URL, up to ~400 KB) or remove (null) the company logo. */
+export const saveCompanyLogo = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      logo: z
+        .string()
+        .max(560_000, "The logo is too large; use an image under 400 KB.")
+        .regex(
+          /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/,
+          "Use a PNG, JPG or WebP image.",
+        )
+        .nullable(),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await admin("settings.manage");
+      const db = getDb();
+      await db.update(t.company).set({ logoData: data.logo }).where(eq(t.company.id, 1));
+      await writeAudit(db, user, {
+        action: data.logo ? "Logo uploaded" : "Logo removed",
+        entity: "Company settings",
+      });
+      return { ok: true };
+    }),
+  );
+
 /* ------------------------------------------------------- financial years */
 
 export const listFinancialYears = createServerFn({ method: "GET" }).handler(() =>

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useAction, useApi } from "@/lib/api";
 import { getCompany, listRoles, saveCompany } from "@/server/functions/admin";
+import { LogoUpload } from "@/components/settings/LogoUpload";
 
 export const Route = createFileRoute("/_authenticated/settings/company")({
   head: () => ({ meta: [{ title: "Company Settings – MFAHH" }] }),
@@ -27,6 +28,7 @@ function CompanySettings() {
   return (
     <div className="space-y-5">
       <PageHeader title="Company Settings" crumbs={["Home", "Settings", "Company"]} />
+      <LogoUpload />
       <section className="card-surface grid gap-4 p-4 sm:grid-cols-2">
         <h2 className="font-semibold text-navy sm:col-span-2">
           Company profile (printed on invoices, vouchers and statements)

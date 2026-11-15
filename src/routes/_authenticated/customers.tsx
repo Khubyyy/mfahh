@@ -26,7 +26,7 @@ export const Route = createFileRoute("/_authenticated/customers")({
         { key: "phone", header: "Phone" },
         { key: "balance", header: "Balance", kind: "money" },
         { key: "overdue", header: "Overdue", kind: "money" },
-        { key: "discountPct", header: "Disc %" },
+        { key: "discountSummary", header: "Discounts" },
         { key: "status", header: "Status", kind: "status" },
       ]}
       filters={[

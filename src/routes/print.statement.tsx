@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getAuthState } from "@/server/functions/auth";
 import { getPartyStatement } from "@/server/functions/reports";
 import { getLookups } from "@/server/functions/masters";
+import { getCompanyLogo } from "@/server/functions/admin";
 import { PrintShell } from "@/components/print/PrintShell";
 import { formatAmount, formatDate } from "@/lib/format";
 import { DOC_DEFS, type DocType } from "@/shared/documents";
@@ -24,6 +25,7 @@ export const Route = createFileRoute("/print/statement")({
   loader: async ({ deps }) => ({
     st: await getPartyStatement({ data: deps }),
     lookups: await getLookups(),
+    logo: (await getCompanyLogo()).logo,
     deps,
   }),
   head: () => ({ meta: [{ title: "Statement – MFAHH" }] }),
@@ -31,7 +33,7 @@ export const Route = createFileRoute("/print/statement")({
 });
 
 function PrintStatement() {
-  const { st, lookups, deps } = Route.useLoaderData();
+  const { st, lookups, deps, logo } = Route.useLoaderData();
   useEffect(() => {
     const t = setTimeout(() => window.print(), 400);
     return () => clearTimeout(t);
@@ -43,7 +45,10 @@ function PrintStatement() {
         ? "Receivable"
         : "Balance";
   return (
-    <PrintShell company={lookups.company} title="Statement of Account">
+    <PrintShell
+      company={lookups.company ? { ...lookups.company, logo } : null}
+      title="Statement of Account"
+    >
       <div className="mb-4 flex justify-between text-sm">
         <div>
           <p className="font-semibold">{st.party.name}</p>

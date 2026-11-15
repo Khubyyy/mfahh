@@ -27,6 +27,7 @@ import {
 import { useCategoryOptions } from "@/components/masters/CategoryManager";
 import { PartyStatement, StockMovement, usePeriod } from "./Ledger";
 import { ContactFooter, Letterhead, TitlePill } from "@/components/print/PrintShell";
+import { getCompanyLogo } from "@/server/functions/admin";
 
 type Row = Record<string, string | number | boolean | null>;
 const s = (r: Row, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
@@ -71,6 +72,7 @@ function ReportFrame({
   children: ReactNode;
 }) {
   const { data: lk } = useLookups();
+  const logo = useApi(["company-logo"], () => getCompanyLogo(), { staleTime: 300_000 });
   return (
     <div className="space-y-4">
       <div className="no-print flex flex-wrap items-end gap-3">{controls}</div>
@@ -79,7 +81,7 @@ function ReportFrame({
         style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}
       >
         <div className="hidden print:block">
-          <Letterhead compact />
+          <Letterhead compact logo={logo.data?.logo} />
           <TitlePill title={title} sub={period} />
         </div>
         <h2 className="text-xl font-bold text-navy print:hidden">{title}</h2>

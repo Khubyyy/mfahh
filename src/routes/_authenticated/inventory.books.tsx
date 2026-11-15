@@ -36,6 +36,13 @@ export const Route = createFileRoute("/_authenticated/inventory/books")({
         { key: "minStock", label: "Minimum stock level", type: "number" },
         { key: "costPrice", label: "Standard cost price (Rs)", type: "number" },
         { key: "salePrice", label: "Sale / retail price (Rs)", type: "number" },
+        {
+          key: "openingQty",
+          label: "Opening stock (qty)",
+          type: "number",
+          help: "Only when adding: books already in hand, valued at the cost price above.",
+          showWhen: (v) => !v["id"],
+        },
       ]}
       columns={[
         { key: "code", header: "Code" },

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { z } from "zod";
 import { getAuthState } from "@/server/functions/auth";
 import { getLookups } from "@/server/functions/masters";
+import { getCompanyLogo } from "@/server/functions/admin";
 import {
   getAgeing,
   getExpenseReport,
@@ -28,22 +29,33 @@ export const Route = createFileRoute("/print/monthly")({
     const from = `${deps.month}-01`;
     const end = new Date(Date.UTC(Number(deps.month.slice(0, 4)), Number(deps.month.slice(5)), 0));
     const to = end.toISOString().slice(0, 10);
-    const [lookups, receipts, byProduct, byCustomer, receivables, expenses, expenseHeads, stock] =
-      await Promise.all([
-        getLookups(),
-        getReceiptsReport({ data: { from, to, groupBy: "detail" } }),
-        getSalesReport({ data: { from, to, groupBy: "product" } }),
-        getSalesReport({ data: { from, to, groupBy: "customer" } }),
-        getAgeing({ data: { partyType: "customer", asOf: to } }),
-        getExpenseReport({ data: { from, to, groupBy: "detail" } }),
-        getExpenseReport({ data: { from, to, groupBy: "head" } }),
-        getStockStatement({ data: { from, to } }),
-      ]);
+    const [
+      lookups,
+      receipts,
+      byProduct,
+      byCustomer,
+      receivables,
+      expenses,
+      expenseHeads,
+      stock,
+      logo,
+    ] = await Promise.all([
+      getLookups(),
+      getReceiptsReport({ data: { from, to, groupBy: "detail" } }),
+      getSalesReport({ data: { from, to, groupBy: "product" } }),
+      getSalesReport({ data: { from, to, groupBy: "customer" } }),
+      getAgeing({ data: { partyType: "customer", asOf: to } }),
+      getExpenseReport({ data: { from, to, groupBy: "detail" } }),
+      getExpenseReport({ data: { from, to, groupBy: "head" } }),
+      getStockStatement({ data: { from, to } }),
+      getCompanyLogo(),
+    ]);
     return {
       month: deps.month,
       from,
       to,
       lookups,
+      logo: logo.logo,
       receipts,
       byProduct,
       byCustomer,
@@ -83,7 +95,7 @@ function TotalRow({ label, cells }: { label: string; cells: (string | number)[] 
 
 function MonthlyPack() {
   const d = Route.useLoaderData();
-  const company = d.lookups.company;
+  const company = d.lookups.company ? { ...d.lookups.company, logo: d.logo } : null;
   const monthName = new Date(`${d.month}-01T00:00:00Z`).toLocaleString("en-GB", {
     month: "long",
     year: "numeric",

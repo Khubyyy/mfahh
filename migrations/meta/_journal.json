@@ -29,6 +29,20 @@
       "when": 1794757297196,
       "tag": "0003_feedback_seed",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794763779809,
+      "tag": "0004_discount_rules_logo",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794763780395,
+      "tag": "0005_discount_rules_seed",
+      "breakpoints": true
     }
   ]
 }

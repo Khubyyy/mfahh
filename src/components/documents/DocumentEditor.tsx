@@ -22,6 +22,9 @@ import {
   docTotals,
   lineAmount,
   round2,
+  ruleDiscount,
+  ruleFor,
+  type DiscountRule,
   type DocType,
   todayISO,
 } from "@/shared/documents";
@@ -64,6 +67,8 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
     discount: 0,
     taxPct: 0,
     extra: {},
+    // Money is entered by hand and is usually cash; a bank / cheque / online can still be chosen.
+    ...(def.money && !id ? { method: "Cash" as const } : {}),
     ...stripType(initial),
   }));
   const [lines, setLines] = useState<EditorLine[]>(() => {
@@ -91,15 +96,22 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
   const extra = (k: string) => (h.extra?.[k] ?? "") as string | number;
   const setLine = (k: string, patch: Partial<EditorLine>) =>
     setLines((ls) => ls.map((l) => (l.key === k ? { ...l, ...patch } : l)));
-  const customerDiscount = (partyId: string | null | undefined) =>
+  /** Customer discount rules (sales invoices and orders only). */
+  const rulesOf = (partyId: string | null | undefined): DiscountRule[] =>
     type === "SI" || type === "SO"
-      ? Number(lk?.customers.find((c) => c.id === partyId)?.discountPct ?? 0)
-      : 0;
+      ? (lk?.discountRules ?? []).filter((r) => r.customerId === partyId)
+      : [];
+  /** Discount for a book under a customer's rules; `fixed` locks it on the line. */
+  const discountFor = (
+    partyId: string | null | undefined,
+    productId: string | null | undefined,
+  ) => {
+    const p = lk?.products.find((x) => x.id === productId);
+    const rule = ruleFor(rulesOf(partyId), p?.category);
+    return { ...ruleDiscount(rule), fixed: rule?.mode === "fixed" };
+  };
   const addLine = (l: Partial<EditorLine> = {}) =>
-    setLines((ls) => [
-      ...ls,
-      { key: key(), qty: 1, rate: 0, discountPct: customerDiscount(h.partyId), ...l },
-    ]);
+    setLines((ls) => [...ls, { key: key(), qty: 1, rate: 0, discountPct: 0, discountRs: 0, ...l }]);
 
   async function save() {
     setBusy(true);
@@ -153,7 +165,7 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
     def.partyType === "customer" ? lk.customers.find((c) => c.id === h.partyId) : undefined;
 
   const totals = docTotals(
-    lines as { qty: number; rate: number; discountPct: number }[],
+    lines as { qty: number; rate: number; discountPct: number; discountRs?: number }[],
     h.discount ?? 0,
     h.taxPct ?? 0,
   );
@@ -219,18 +231,17 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                     }));
                     if (["SR", "PR", "SMR"].includes(type)) setLines([]);
                     if ((type === "SI" || type === "SO") && !h.refDocId) {
-                      // Customer-level discount: replace the previous customer's default on every
-                      // line that still carries it; lines changed by hand are left alone.
-                      const prev = customerDiscount(h.partyId);
-                      const next = customerDiscount(v);
+                      // Customer discount rules fill every book line for the new customer.
                       setLines((ls) =>
-                        ls.map((l) =>
-                          (l.discountPct ?? 0) === prev ? { ...l, discountPct: next } : l,
-                        ),
+                        ls.map((l) => {
+                          if (!l.productId) return l;
+                          const d = discountFor(v, l.productId);
+                          return { ...l, discountPct: d.discountPct, discountRs: d.discountRs };
+                        }),
                       );
-                      if (next > 0)
+                      if (rulesOf(v).some((r) => r.value > 0))
                         toast.info(
-                          `Customer discount ${next}% applied to the lines. Review before saving.`,
+                          "Customer discounts applied to the lines. Review before saving.",
                         );
                     }
                     setAlloc({});
@@ -267,8 +278,8 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                       ? "Reference (count sheet no.)"
                       : type === "EXP"
                         ? "Supporting bill / invoice no."
-                        : type === "RV"
-                          ? "Receipt book / slip no."
+                        : type === "RV" || type === "PV"
+                          ? "Invoice no. (optional)"
                           : "Reference"
                 }
                 placeholder={type === "EXP" ? "Vendor's bill no., if any" : undefined}
@@ -292,12 +303,16 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
                   : ""}
               </span>
               <span>{selectedCustomer.category}</span>
-              {(type === "SI" || type === "SO") && Number(selectedCustomer.discountPct) > 0 && (
-                <span className="font-semibold text-primary">
-                  Customer discount {Number(selectedCustomer.discountPct)}% (applied per line,
-                  editable)
-                </span>
-              )}
+              {(type === "SI" || type === "SO") &&
+                rulesOf(selectedCustomer.id)
+                  .filter((r) => r.value > 0)
+                  .map((r) => (
+                    <span key={r.category} className="font-semibold text-primary">
+                      {r.category || "All books"}:{" "}
+                      {r.kind === "pct" ? `${r.value}%` : `Rs ${r.value}/item`}
+                      {r.mode === "fixed" ? " (fixed)" : ""}
+                    </span>
+                  ))}
             </p>
           )}
 
@@ -453,6 +468,11 @@ export function DocumentEditor({ type, id, initial, onClose, onSaved }: EditorPr
               priced={type !== "SMP"}
               costBased={type === "PI"}
               fromOrder={Boolean(h.refDocId)}
+              discountFor={
+                type === "SI" || type === "SO"
+                  ? (productId: string) => discountFor(h.partyId, productId)
+                  : undefined
+              }
             />
           )}
           {type === "PI" && (h.kind === "Material" || h.kind === "Service") && (
@@ -830,6 +850,7 @@ function ProductLines({
   priced,
   costBased,
   fromOrder,
+  discountFor,
 }: {
   lines: EditorLine[];
   setLine: (k: string, p: Partial<EditorLine>) => void;
@@ -840,6 +861,8 @@ function ProductLines({
   priced: boolean;
   costBased: boolean;
   fromOrder: boolean;
+  /** Sales: the customer's discount for a book (fixed = locked). */
+  discountFor?: (productId: string) => { discountPct: number; discountRs: number; fixed: boolean };
 }) {
   return (
     <Section
@@ -860,7 +883,8 @@ function ProductLines({
             <th className={`${th} w-24`}>Qty</th>
             {priced && (
               <>
-                <th className={`${th} w-32`}>Rate</th>
+                <th className={`${th} w-28`}>Rate</th>
+                {discountFor && <th className={`${th} w-24`}>Disc Rs/item</th>}
                 <th className={`${th} w-24`}>Disc %</th>
                 <th className={`${th} w-32 text-right`}>Amount</th>
               </>
@@ -871,6 +895,7 @@ function ProductLines({
         <tbody>
           {lines.map((l) => {
             const p = products.find((x) => x.id === l.productId);
+            const locked = Boolean(l.productId && discountFor?.(l.productId).fixed);
             return (
               <tr key={l.key} className="border-t">
                 <td className={td}>
@@ -883,9 +908,11 @@ function ProductLines({
                       ariaLabel="Book"
                       onChange={(v) => {
                         const prod = products.find((x) => x.id === v);
+                        const d = discountFor?.(v);
                         setLine(l.key, {
                           productId: v,
                           rate: costBased ? (prod?.costPrice ?? 0) : (prod?.salePrice ?? 0),
+                          ...(d ? { discountPct: d.discountPct, discountRs: d.discountRs } : {}),
                         });
                       }}
                     />
@@ -919,6 +946,20 @@ function ProductLines({
                         onChange={(e) => setLine(l.key, { rate: num(e.target.value) })}
                       />
                     </td>
+                    {discountFor && (
+                      <td className={td}>
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          aria-label="Discount Rs per item"
+                          disabled={locked}
+                          value={l.discountRs || ""}
+                          placeholder="0"
+                          onChange={(e) => setLine(l.key, { discountRs: num(e.target.value) })}
+                        />
+                      </td>
+                    )}
                     <td className={td}>
                       <Input
                         type="number"
@@ -926,9 +967,14 @@ function ProductLines({
                         max={100}
                         step="0.01"
                         aria-label="Discount %"
+                        disabled={locked}
+                        title={locked ? "Fixed customer discount" : undefined}
                         value={l.discountPct ?? ""}
                         onChange={(e) => setLine(l.key, { discountPct: num(e.target.value) })}
                       />
+                      {locked && (
+                        <p className="mt-0.5 text-[10px] text-muted-foreground">Fixed rule</p>
+                      )}
                     </td>
                     <td className={`${td} pt-3 text-right tabular-nums`}>
                       {formatAmount(lineAmount(l))}
@@ -1140,6 +1186,7 @@ function ReturnLines({
                 <>
                   <td className={`${td} pt-3 tabular-nums`}>
                     {formatAmount(l.rate)}
+                    {l.discountRs ? ` less Rs ${l.discountRs}` : ""}
                     {l.discountPct ? ` less ${l.discountPct}%` : ""}
                   </td>
                   <td className={`${td} pt-3 text-right tabular-nums`}>
@@ -1887,6 +1934,7 @@ function OrderPicker({
             remaining: Number(l["remaining"]),
             rate: Number(l["rate"]),
             discountPct: Number(l["discountPct"]),
+            discountRs: Number(l["discountRs"] ?? 0),
           })),
         );
       }}
@@ -1934,6 +1982,7 @@ function ReturnSource({
             remaining: Number(l["remaining"]),
             rate: Number(l["rate"]),
             discountPct: Number(l["discountPct"]),
+            discountRs: Number(l["discountRs"] ?? 0),
           })),
         );
       }}

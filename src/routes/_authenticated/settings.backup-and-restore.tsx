@@ -17,7 +17,26 @@ import {
 import { useAction, useApi } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { formatDateTime } from "@/lib/format";
-import { getBackups, runBackup, runRestore } from "@/server/functions/admin";
+import { exportDataBackup, getBackups, runBackup, runRestore } from "@/server/functions/admin";
+import { toast } from "sonner";
+import { errorText } from "@/lib/api";
+import { todayISO } from "@/shared/documents";
+
+/** Downloads every business record as one JSON file (works on shared hosting). */
+async function downloadDataBackup() {
+  try {
+    const json = await exportDataBackup();
+    const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `mfahh-data-backup-${todayISO()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success("Data backup downloaded. Keep it somewhere safe.");
+  } catch (e) {
+    toast.error(errorText(e));
+  }
+}
 
 export const Route = createFileRoute("/_authenticated/settings/backup-and-restore")({
   head: () => ({ meta: [{ title: "Backup & Restore – MFAHH" }] }),
@@ -47,12 +66,25 @@ function Backups() {
         title="Backup & Restore"
         crumbs={["Home", "Settings", "Backup & Restore"]}
         actions={
-          <Button disabled={backup.isPending} onClick={() => backup.mutate(undefined)}>
-            <DatabaseBackup />
-            {backup.isPending ? "Backing up…" : "Back up now"}
-          </Button>
+          <>
+            <Button variant="outline" onClick={() => void downloadDataBackup()}>
+              <Download />
+              Download data backup
+            </Button>
+            <Button disabled={backup.isPending} onClick={() => backup.mutate(undefined)}>
+              <DatabaseBackup />
+              {backup.isPending ? "Backing up…" : "Back up now"}
+            </Button>
+          </>
         }
       />
+      <p className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-2 text-sm text-muted-foreground">
+        <b>Download data backup</b> saves every business record (customers, books, invoices,
+        receipts, expenses, ledgers, stock) as one file on your computer, and works on any hosting.
+        Download one regularly. If the database is hosted on Supabase, it also keeps its own daily
+        backups. “Back up now” needs PostgreSQL tools on the server and may not work on shared
+        hosting.
+      </p>
       {q.data && !q.data.encryption && (
         <p className="flex items-center gap-2 rounded-lg border border-warning/40 bg-tint-orange p-3 text-sm">
           <ShieldAlert className="size-4" />

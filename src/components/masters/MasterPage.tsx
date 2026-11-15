@@ -37,6 +37,7 @@ import {
 import type { Permission } from "@/shared/permissions";
 import { useQueryClient } from "@tanstack/react-query";
 import { CategorySelect } from "./CategoryManager";
+import { DiscountRulesEditor, parseRules } from "./DiscountRulesEditor";
 import type { CategoryKind } from "@/shared/masters";
 
 export type Row = Record<string, string | number | boolean | null>;
@@ -55,7 +56,8 @@ export interface FieldDef {
     | "account"
     | "groupAccount"
     | "checkbox"
-    | "category";
+    | "category"
+    | "discountRules";
   /** For type "category": which user-managed list supplies the options. */
   categoryKind?: CategoryKind;
   /** Only shown when this returns true for the current form values. */
@@ -373,11 +375,18 @@ function MasterForm({
                 : ""
               : f.type === "number"
                 ? Number(values[f.key] ?? 0)
-                : (values[f.key] ?? (f.type === "checkbox" ? false : "")),
+                : f.type === "discountRules"
+                  ? parseRules(values[f.key])
+                  : (values[f.key] ?? (f.type === "checkbox" ? false : "")),
           ]),
       );
-      await saveMaster({ data: { entity, id: record ? s(record, "id") : null, values: payload } });
+      const res = await saveMaster({
+        data: { entity, id: record ? s(record, "id") : null, values: payload },
+      });
       toast.success(`${singular} saved`);
+      if (res.opening) toast.success(`Opening entry ${res.opening} posted`);
+      if (res.openingError)
+        toast.warning(`Saved, but the opening entry was not posted: ${res.openingError}`);
       await qc.invalidateQueries();
       onClose();
     } catch (e) {
@@ -407,6 +416,14 @@ function MasterForm({
                 const locked = Boolean(record && f.lockWhen?.(record));
                 const v = values[f.key];
                 const cls = f.wide || f.type === "textarea" ? "sm:col-span-2" : "";
+                if (f.type === "discountRules")
+                  return (
+                    <DiscountRulesEditor
+                      key={f.key}
+                      value={parseRules(v)}
+                      onChange={(r) => setValues((x) => ({ ...x, [f.key]: JSON.stringify(r) }))}
+                    />
+                  );
                 if (f.type === "category" && f.categoryKind)
                   return (
                     <CategorySelect
@@ -544,6 +561,7 @@ function MasterView({
       return a ? `${a.code} ${a.name}` : "—";
     }
     if (f.key === "discountPct") return `${Number(v ?? 0)}%`;
+    if (f.type === "discountRules") return s(row, "discountSummary") || "None";
     if (f.type === "number")
       return f.key.toLowerCase().includes("price") ||
         ["creditLimit", "basic", "allowances", "deductions"].includes(f.key)

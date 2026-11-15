@@ -32,7 +32,8 @@ import {
   type DocumentDetail,
 } from "@/server/functions/documents";
 import { useQueryClient } from "@tanstack/react-query";
-import { ClipboardList } from "lucide-react";
+import { ClipboardList, Truck } from "lucide-react";
+import { DeliveryDialog } from "./DeliveryDialog";
 import type { DocType } from "@/shared/documents";
 import type { DocInput } from "@/server/posting/prepare";
 import { DocumentEditor } from "./DocumentEditor";
@@ -84,6 +85,7 @@ function toInput(d: DocumentDetail): Partial<DocInput> {
       qty: Number(l["qty"] ?? 0),
       rate: Number(l["rate"] ?? 0),
       discountPct: Number(l["discountPct"] ?? 0),
+      discountRs: Number(l["discountRs"] ?? 0),
       debit: Number(l["debit"] ?? 0),
       credit: Number(l["credit"] ?? 0),
       refLineId: (l["refLineId"] as string) ?? null,
@@ -116,6 +118,7 @@ export function DocumentView({
   const [reason, setReason] = useState("");
   const [editing, setEditing] = useState(startEditing);
   const [converting, setConverting] = useState(false);
+  const [delivering, setDelivering] = useState(false);
   const toOrder = async () => {
     setConverting(true);
     try {
@@ -187,6 +190,16 @@ export function DocumentView({
         onClose={() => setEditing(false)}
       />
     );
+  if (delivering)
+    return (
+      <DeliveryDialog
+        orderId={id}
+        docNo={s(doc, "docNo")}
+        lines={d.lines}
+        today={new Date().toISOString().slice(0, 10)}
+        onClose={() => setDelivering(false)}
+      />
+    );
   if (follow)
     return (
       <DocumentEditor type={follow.type} initial={follow.initial} onClose={() => setFollow(null)} />
@@ -213,6 +226,20 @@ export function DocumentView({
     ...(doc["fromInvoice"]
       ? [["Recorded from invoice", s(doc, "fromInvoice")] as [string, string]]
       : []),
+    ...(
+      JSON.parse(s(doc, "deliveries") || "[]") as {
+        date: string;
+        note: string;
+        by: string;
+        lines: { qty: number }[];
+      }[]
+    ).map(
+      (x, i) =>
+        [
+          `Delivery ${i + 1}`,
+          `${formatDate(x.date)} · ${x.lines.reduce((a, l) => a + l.qty, 0)} copies · ${x.by}${x.note ? ` · ${x.note}` : ""}`,
+        ] as [string, string],
+    ),
     ...(doc["reference"] ? [["Reference", s(doc, "reference")] as [string, string]] : []),
     ...["issuedTo", "purpose", "expectedReturn", "reason", "condition", "month", "loanType"]
       .filter((k) => doc[k])
@@ -494,6 +521,12 @@ export function DocumentView({
               <Printer />
               Print / PDF
             </Button>
+            {type === "SO" && status === "Approved" && (
+              <Button variant="secondary" size="sm" onClick={() => setDelivering(true)}>
+                <Truck />
+                Record delivery
+              </Button>
+            )}
             {d.can.toOrder && (
               <Button
                 variant="secondary"
@@ -688,10 +721,17 @@ function LinesTable({ type, lines }: { type: DocType; lines: Row[] }) {
     ["qty", "Qty"],
   ];
   if (type === "SR") cols.push(["condition", "Condition"]);
-  if (type === "SO" || type === "SMP" || type === "SI" || type === "PI")
-    cols.push(["doneQty", type === "SO" ? "Delivered" : "Returned"]);
+  if (type === "SO") cols.push(["doneQty", "Invoiced"], ["delivered", "Delivered"]);
+  if (type === "SMP" || type === "SI" || type === "PI") cols.push(["doneQty", "Returned"]);
   if (!["SMP", "SMR", "ADJ", "DMG"].includes(type))
-    cols.push(["rate", "Rate", "amt"], ["discountPct", "Disc %"], ["amount", "Amount", "amt"]);
+    cols.push(
+      ["rate", "Rate", "amt"],
+      ...(lines.some((l) => Number(l["discountRs"]) > 0)
+        ? ([["discountRs", "Disc Rs/item", "amt"]] as Col[])
+        : []),
+      ["discountPct", "Disc %"],
+      ["amount", "Amount", "amt"],
+    );
   else cols.push(["unitCost", "Unit cost", "amt"]);
   return <SimpleTable rows={rows} cols={cols} />;
 }

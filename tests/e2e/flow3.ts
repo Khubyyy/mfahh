@@ -69,7 +69,7 @@ async function main() {
       await pickSelect(page, "Location *", "Outside Karachi");
       await dlg.getByLabel("City / town (optional)").fill("Multan");
       await dlg.getByLabel("Phone").fill(PHONE);
-      await dlg.getByLabel("Customer discount %").fill("12");
+      await dlg.getByLabel("Rule 1 discount").fill("12");
       await dlg.getByRole("button", { name: "Save" }).click();
       await expectToast(page, /Customer saved/);
       const row = page.getByRole("row").filter({ hasText: CUSTOMER });
@@ -85,7 +85,7 @@ async function main() {
       const dlg = page.getByRole("dialog");
       await pickSearch(page, dlg.getByLabel("Book"), BOOK);
       await pickSearch(page, dlg.getByLabel("Party"), digits);
-      await dlg.getByText(`Customer discount 12%`).waitFor();
+      await dlg.getByText("All books: 12%").waitFor();
       const disc = await dlg.getByLabel("Discount %").first().inputValue();
       if (disc !== "12") throw new Error(`Line discount should be 12, got ${disc}`);
       await dlg.getByLabel("Quantity").first().fill("10");

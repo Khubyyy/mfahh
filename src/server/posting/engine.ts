@@ -288,6 +288,7 @@ export async function orderFromInvoice(user: SessionUser, invoiceId: string) {
         qty: l.qty,
         rate: l.rate,
         discountPct: l.discountPct,
+        discountRs: l.discountRs,
       })),
     },
     true,

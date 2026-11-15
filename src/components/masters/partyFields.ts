@@ -13,6 +13,13 @@ export const partyFields: FieldDef[] = [
   { key: "address", label: "Address", wide: true },
   { key: "ntn", label: "NTN" },
   { key: "creditDays", label: "Credit period (days)", type: "number" },
+  {
+    key: "openingBalance",
+    label: "Opening balance payable (Rs)",
+    type: "number",
+    help: "Only when adding: what you already owe this supplier. Posted as an opening entry.",
+    showWhen: (v) => !v["id"],
+  },
 ];
 
 /** Customer form: location (Karachi / outside) drives whether the city is asked for. */
@@ -47,10 +54,12 @@ export const customerFields: FieldDef[] = [
   { key: "creditDays", label: "Credit period (days)", type: "number" },
   { key: "creditLimit", label: "Credit limit (Rs, 0 = none)", type: "number" },
   {
-    key: "discountPct",
-    label: "Customer discount %",
+    key: "openingBalance",
+    label: "Opening balance receivable (Rs)",
     type: "number",
-    help: "Applied automatically to new invoices and orders for this customer; you can still change it per line.",
+    help: "Only when adding: what this customer already owes you. Posted as an opening entry.",
+    showWhen: (v) => !v["id"],
   },
+  { key: "discountRules", label: "Discounts", type: "discountRules", wide: true },
   { key: "notes", label: "Notes", type: "textarea" },
 ];

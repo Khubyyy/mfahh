@@ -3,6 +3,7 @@ import { z } from "zod";
 import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { getDb } from "../db/client";
+import { writeAudit } from "../audit";
 import * as t from "../db/schema";
 import { assertPerm, requireUser, type SessionUser } from "../security/session";
 import {
@@ -101,7 +102,7 @@ export const listDocuments = createServerFn({ method: "GET" })
         .orderBy(desc(t.documents.date), desc(t.documents.docNo))
         .limit(data.limit);
       const names = await partyNames(rows.map((r) => r.d.partyId ?? ""));
-      const lineAgg = new Map<string, { qty: number; done: number }>();
+      const lineAgg = new Map<string, { qty: number; done: number; delivered: number }>();
       const needLines = rows
         .filter((r) => r.d.type === "SO" || r.d.type === "SMP")
         .map((r) => r.d.id);
@@ -111,24 +112,24 @@ export const listDocuments = createServerFn({ method: "GET" })
             id: t.documentLines.documentId,
             qty: sql<number>`sum(${t.documentLines.qty})::int`,
             done: sql<number>`sum(${t.documentLines.doneQty})::int`,
+            delivered: sql<number>`sum(coalesce((${t.documentLines.extra}->>'delivered')::int, 0))::int`,
           })
           .from(t.documentLines)
           .where(inArray(t.documentLines.documentId, needLines))
           .groupBy(t.documentLines.documentId);
-        for (const a of agg) lineAgg.set(a.id, { qty: a.qty, done: a.done });
+        for (const a of agg)
+          lineAgg.set(a.id, { qty: a.qty, done: a.done, delivered: a.delivered });
       }
       const today = todayISO();
       return toRows(
         rows.map(({ d, createdByName, approvedByName, head }) => {
           const p = names.get(d.partyId ?? "");
-          const agg = lineAgg.get(d.id) ?? { qty: 0, done: 0 };
+          const agg = lineAgg.get(d.id) ?? { qty: 0, done: 0, delivered: 0 };
           const derived =
             d.type === "SI" || d.type === "PI"
               ? payStatus(d, today)
               : d.type === "SO"
-                ? d.refDocId && d.status !== "Cancelled"
-                  ? "Invoiced"
-                  : deliveryStatus(d.status, [{ qty: agg.qty, doneQty: agg.done }])
+                ? soProgress(d, agg)
                 : d.type === "SMP"
                   ? sampleStatus(
                       d.status,
@@ -189,6 +190,24 @@ export const listDocuments = createServerFn({ method: "GET" })
       );
     }),
   );
+
+/**
+ * Sales order status. Order-first: delivered = the larger of invoiced and dispatched.
+ * Invoice-first (already invoiced): only dispatch counts.
+ */
+function soProgress(
+  d: { status: DocStatus; refDocId: string | null },
+  a: { qty: number; done: number; delivered: number },
+) {
+  if (d.status !== "Approved") return d.status === "Cancelled" ? "Cancelled" : d.status;
+  if (d.refDocId)
+    return a.delivered >= a.qty && a.qty > 0
+      ? "Invoiced · Delivered"
+      : a.delivered > 0
+        ? "Invoiced · Partly delivered"
+        : "Invoiced · Not delivered";
+  return deliveryStatus(d.status, [{ qty: a.qty, doneQty: Math.max(a.done, a.delivered) }]);
+}
 
 export interface DocumentDetail {
   doc: Row;
@@ -315,6 +334,7 @@ export const getDocument = createServerFn({ method: "GET" })
             ...Object.fromEntries(
               Object.entries(d.extra).map(([k, v]) => [k, v as string | number | null]),
             ),
+            deliveries: JSON.stringify(d.extra["deliveries"] ?? []),
             partyName: p?.name ?? null,
             partyCode: p?.code ?? null,
             createdByName: row.createdByName,
@@ -326,7 +346,11 @@ export const getDocument = createServerFn({ method: "GET" })
               d.type === "SI" || d.type === "PI"
                 ? payStatus(d, today)
                 : d.type === "SO"
-                  ? deliveryStatus(d.status, allLines)
+                  ? soProgress(d, {
+                      qty: lines.reduce((x, l) => x + l.l.qty, 0),
+                      done: lines.reduce((x, l) => x + l.l.doneQty, 0),
+                      delivered: lines.reduce((x, l) => x + Number(l.l.extra["delivered"] ?? 0), 0),
+                    })
                   : d.type === "SMP"
                     ? sampleStatus(
                         d.status,
@@ -434,6 +458,78 @@ export const saveDocument = createServerFn({ method: "POST" })
     safe(async () => {
       const user = await requireUser();
       return data.id ? updateDraft(user, data.id, data.input) : createDocument(user, data.input);
+    }),
+  );
+
+/**
+ * Sales order dispatch: record quantities delivered (no stock or ledger effect; stock moves with
+ * the invoice). Cumulative per line, never more than ordered.
+ */
+export const recordDelivery = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      orderId: z.string().uuid(),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      note: z.string().max(300).default(""),
+      lines: z
+        .array(z.object({ lineId: z.string().uuid(), qty: z.number().int().min(0).max(1e7) }))
+        .min(1)
+        .max(500),
+    }),
+  )
+  .handler(({ data }) =>
+    safe(async () => {
+      const user = await requireUser();
+      assertPerm(user, DOC_DEFS.SO.createPerm);
+      return getDb().transaction(async (tx) => {
+        const [so] = await tx
+          .select()
+          .from(t.documents)
+          .where(eq(t.documents.id, data.orderId))
+          .for("update");
+        if (!so || so.type !== "SO") return fail("Sales order not found.");
+        if (so.status !== "Approved") fail(`${so.docNo} must be approved before delivery.`);
+        const lines = await tx
+          .select()
+          .from(t.documentLines)
+          .where(eq(t.documentLines.documentId, so.id));
+        const byId = new Map(lines.map((l) => [l.id, l]));
+        const entries: { lineId: string; qty: number }[] = [];
+        for (const d of data.lines.filter((x) => x.qty > 0)) {
+          const l = byId.get(d.lineId) ?? fail("A line is not part of this order.");
+          const done = Number(l.extra["delivered"] ?? 0);
+          if (done + d.qty > l.qty) fail(`Line ${l.lineNo}: only ${l.qty - done} left to deliver.`);
+          await tx
+            .update(t.documentLines)
+            .set({ extra: { ...l.extra, delivered: done + d.qty } })
+            .where(eq(t.documentLines.id, l.id));
+          entries.push(d);
+        }
+        if (!entries.length) fail("Enter at least one delivered quantity.");
+        const log = Array.isArray(so.extra["deliveries"])
+          ? (so.extra["deliveries"] as unknown[])
+          : [];
+        await tx
+          .update(t.documents)
+          .set({
+            extra: {
+              ...so.extra,
+              deliveries: [
+                ...log,
+                { date: data.date, note: data.note, by: user.name, lines: entries },
+              ],
+            },
+          })
+          .where(eq(t.documents.id, so.id));
+        await writeAudit(tx, user, {
+          action: "Delivery recorded",
+          entity: DOC_DEFS.SO.label,
+          entityId: so.id,
+          ref: so.docNo,
+          details: { date: data.date, qty: entries.reduce((x, e) => x + e.qty, 0) },
+        });
+        return { ok: true };
+      });
     }),
   );
 
@@ -606,6 +702,7 @@ export const sourceDocuments = createServerFn({ method: "GET" })
               remaining: l.qty - l.doneQty,
               rate: l.rate,
               discountPct: l.discountPct,
+              discountRs: l.discountRs,
             })),
         ),
       };

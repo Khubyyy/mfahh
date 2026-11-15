@@ -3,6 +3,7 @@ import { useEffect, type ReactNode } from "react";
 import { getAuthState } from "@/server/functions/auth";
 import { getDocument } from "@/server/functions/documents";
 import { getLookups } from "@/server/functions/masters";
+import { getCompanyLogo } from "@/server/functions/admin";
 import { PrintShell } from "@/components/print/PrintShell";
 import {
   InfoBox,
@@ -26,6 +27,7 @@ export const Route = createFileRoute("/print/$id")({
   loader: async ({ params }) => ({
     detail: await getDocument({ data: { id: params.id } }),
     lookups: await getLookups(),
+    logo: (await getCompanyLogo()).logo,
   }),
   head: () => ({ meta: [{ title: "Print – MFAHH" }] }),
   component: PrintDocument,
@@ -62,7 +64,7 @@ const SUBTITLES: Partial<Record<DocType, string>> = {
 };
 
 function PrintDocument() {
-  const { detail, lookups } = Route.useLoaderData();
+  const { detail, lookups, logo } = Route.useLoaderData();
   const d = detail.doc;
   const type = s(d, "type") as DocType;
   useEffect(() => {
@@ -101,7 +103,7 @@ function PrintDocument() {
       ...(type === "SR" ? [{ header: "Condition", width: "74px" }] : []),
       { header: "Qty", align: "right", width: "52px" },
       { header: "Rate", align: "right", width: "74px" },
-      { header: "Disc %", align: "right", width: "58px" },
+      { header: "Disc", align: "right", width: "70px" },
       { header: "Amount (PKR)", align: "right", width: "104px" },
     ];
     const rows = detail.lines.map((l, i) => [
@@ -117,7 +119,12 @@ function PrintDocument() {
       ...(type === "SR" ? [s(l, "condition") || "Saleable"] : []),
       s(l, "qty"),
       amt(l["rate"]),
-      Number(l["discountPct"]) ? `${Number(l["discountPct"])}%` : "",
+      [
+        Number(l["discountRs"]) ? `Rs ${amt(l["discountRs"])}` : "",
+        Number(l["discountPct"]) ? `${Number(l["discountPct"])}%` : "",
+      ]
+        .filter(Boolean)
+        .join(" + "),
       amt(l["amount"]),
     ]);
     const settled = Number(d["paidAmount"]) + Number(d["creditedAmount"]);
@@ -311,7 +318,7 @@ function PrintDocument() {
 
   return (
     <PrintShell
-      company={lookups.company}
+      company={lookups.company ? { ...lookups.company, logo } : null}
       title={TITLES[type] ?? s(d, "typeLabel")}
       sub={SUBTITLES[type]}
       status={s(d, "status")}

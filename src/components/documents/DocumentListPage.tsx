@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Plus,
   ClipboardList,
@@ -269,6 +269,16 @@ export function DocumentListPage({
     },
   };
   const creatable = create.filter((t) => can(DOC_DEFS[t].createPerm));
+  // Dashboard shortcuts open the form directly: /sales/receipts?new=RV
+  const wanted =
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("new");
+  useEffect(() => {
+    if (wanted && lk && creatable.includes(wanted as DocInput["type"])) {
+      setNewType(wanted as DocInput["type"]);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wanted, Boolean(lk)]);
   const active = all.filter((r) => r["status"] !== "Cancelled");
   const totalValue = active
     .filter((r) => r["status"] === "Approved")

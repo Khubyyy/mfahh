@@ -6,6 +6,7 @@ import * as t from "../db/schema";
 import { diff, writeAudit } from "../audit";
 import { assertPerm, requireUser, type SessionUser } from "../security/session";
 import { safe, toRows, type Row } from "./_safe";
+import { approveDocument, createDocument } from "../posting/engine";
 import type { Permission } from "@/shared/permissions";
 import { todayISO } from "@/shared/documents";
 import {
@@ -25,6 +26,16 @@ const isoDate = z
   .nullish()
   .or(z.literal("").transform(() => null));
 const email = z.string().trim().max(200).email("Invalid email").or(z.literal("")).default("");
+
+/** Customer discount rule as entered on the customer form. */
+const ruleSchema = z.object({
+  category: z.string().trim().max(60).default(""),
+  kind: z.enum(["pct", "rs"]),
+  value: z.coerce.number().finite().min(0).max(1e9),
+  mode: z.enum(["fixed", "editable"]),
+});
+/** Opening balance on a new customer (receivable) or supplier (payable); posted as an OB document. */
+const openingAmount = z.coerce.number().finite().min(0).max(1e12).default(0);
 
 /** Blank on a new record = generate the next code automatically. */
 const autoCode = (max: number) => z.string().trim().max(max).default("");
@@ -58,13 +69,19 @@ const ENTITIES = {
         .min(0, "Discount cannot be negative")
         .max(100, "Discount cannot exceed 100%")
         .default(0),
+      discountRules: z.array(ruleSchema).max(60).default([]),
+      openingBalance: openingAmount,
     }),
   },
   suppliers: {
     table: t.suppliers,
     perm: "suppliers.manage",
     label: "Supplier",
-    schema: z.object({ ...partyFields, category: req("Category", 60) }),
+    schema: z.object({
+      ...partyFields,
+      category: req("Category", 60),
+      openingBalance: openingAmount,
+    }),
   },
   products: {
     table: t.products,
@@ -81,6 +98,12 @@ const ENTITIES = {
       costPrice: amount,
       salePrice: amount,
       minStock: z.coerce.number().int().min(0).max(1e7).default(0),
+      openingQty: z.coerce
+        .number()
+        .int()
+        .min(0, "Opening stock cannot be negative")
+        .max(1e7)
+        .default(0),
     }),
   },
   accounts: {
@@ -191,13 +214,37 @@ async function listRaw(entity: MasterEntity): Promise<object[]> {
           group by party_id`);
       const b = new Map(bal.map((r) => [r.party_id, Number(r.bal) * (isCust ? 1 : -1)]));
       const o = new Map(overdue.map((r) => [r.party_id, Number(r.amt)]));
+      const ruleRows = isCust ? await db.select().from(t.customerDiscountRules) : [];
+      const rulesBy = new Map<string, typeof ruleRows>();
+      for (const r of ruleRows)
+        rulesBy.set(r.customerId, [...(rulesBy.get(r.customerId) ?? []), r]);
       // Unallocated payments still reduce what is overdue, so overdue never exceeds the balance.
       return rows.map((r) => {
         const balance = b.get(r.id) ?? 0;
+        const rs = rulesBy.get(r.id) ?? [];
         return {
           ...r,
           balance,
           overdue: Math.max(0, Math.min(o.get(r.id) ?? 0, balance)),
+          ...(isCust
+            ? {
+                discountRules: JSON.stringify(
+                  rs.map((x) => ({
+                    category: x.category,
+                    kind: x.kind,
+                    value: x.value,
+                    mode: x.mode,
+                  })),
+                ),
+                discountSummary: rs
+                  .sort((a, b2) => a.category.localeCompare(b2.category))
+                  .map(
+                    (x) =>
+                      `${x.category || "All"}: ${x.kind === "pct" ? `${x.value}%` : `Rs ${x.value}/item`}${x.mode === "fixed" ? " (fixed)" : ""}`,
+                  )
+                  .join("; "),
+              }
+            : {}),
         };
       });
     }
@@ -275,9 +322,29 @@ export const saveMaster = createServerFn({ method: "POST" })
       const def = ENTITIES[data.entity];
       assertPerm(user, def.perm as Permission);
       const values = def.schema.parse(data.values) as Record<string, unknown>;
+      // Not columns of the master table: handled separately below.
+      const rules = (values["discountRules"] as z.infer<typeof ruleSchema>[] | undefined) ?? null;
+      const openingBalance = Number(values["openingBalance"] ?? 0);
+      const openingQty = Number(values["openingQty"] ?? 0);
+      delete values["discountRules"];
+      delete values["openingBalance"];
+      delete values["openingQty"];
+      if (data.entity === "customers" && rules) {
+        for (const r of rules) {
+          if (r.kind === "pct" && r.value > 100)
+            throw new Error("A percentage discount cannot exceed 100%.");
+        }
+        const cats = rules.map((r) => r.category.toLowerCase());
+        if (new Set(cats).size !== cats.length)
+          throw new Error("Each category can have only one discount rule.");
+        // The default % rule is also kept on the customer row for lists and older screens.
+        const def0 = rules.find((r) => !r.category);
+        values["discountPct"] = def0?.kind === "pct" ? def0.value : 0;
+      }
+      if ((openingBalance > 0 || openingQty > 0) && !data.id) assertPerm(user, "accounts.manage");
       const db = getDb();
       const table = def.table as typeof t.customers; // all share id/status/created columns
-      return db.transaction(async (tx) => {
+      const saved = await db.transaction(async (tx) => {
         const existing = data.id
           ? ((await tx.select().from(table).where(eq(table.id, data.id)).for("update"))[0] as
               Record<string, unknown> | undefined)
@@ -445,8 +512,46 @@ export const saveMaster = createServerFn({ method: "POST" })
             ref: String(values["code"] ?? values["empId"] ?? values["name"]),
           });
         }
-        return { id: String(row["id"]) };
+        if (data.entity === "customers" && rules) {
+          const cid = String(row["id"]);
+          await tx
+            .delete(t.customerDiscountRules)
+            .where(eq(t.customerDiscountRules.customerId, cid));
+          const keep = rules.filter((r) => r.value > 0);
+          if (keep.length)
+            await tx
+              .insert(t.customerDiscountRules)
+              .values(keep.map((r) => ({ ...r, customerId: cid })));
+        }
+        return { id: String(row["id"]), isNew: !existing };
       });
+
+      // Opening balance / stock for a new record: posted through the normal engine as an
+      // Opening Balances document, approved straight away when the user may approve it.
+      let opening: string | null = null;
+      let openingError: string | null = null;
+      if (saved.isNew && (openingBalance > 0 || openingQty > 0))
+        try {
+          const today = todayISO();
+          const line =
+            data.entity === "products"
+              ? { productId: saved.id, qty: openingQty, rate: Number(values["costPrice"] ?? 0) }
+              : data.entity === "customers"
+                ? { partyType: "customer" as const, partyId: saved.id, debit: openingBalance }
+                : { partyType: "supplier" as const, partyId: saved.id, credit: openingBalance };
+          const ob = await createDocument(user, {
+            type: "OB",
+            date: today,
+            narration: `Opening ${data.entity === "products" ? "stock" : "balance"}: ${String(values["name"])}`,
+            lines: [line],
+          });
+          if (user.permissions.has("accounts.approve")) await approveDocument(user, ob.id);
+          opening = ob.docNo;
+        } catch (e) {
+          // The record itself is saved; tell the user the opening entry needs doing by hand.
+          openingError = e instanceof Error ? e.message : String(e);
+        }
+      return { id: saved.id, opening, openingError };
     }),
   );
 
@@ -608,6 +713,17 @@ export const getLookups = createServerFn({ method: "GET" }).handler(() =>
         })
         .from(t.bankAccounts)
         .orderBy(asc(t.bankAccounts.name)),
+      discountRules: sales
+        ? await db
+            .select({
+              customerId: t.customerDiscountRules.customerId,
+              category: t.customerDiscountRules.category,
+              kind: t.customerDiscountRules.kind,
+              value: t.customerDiscountRules.value,
+              mode: t.customerDiscountRules.mode,
+            })
+            .from(t.customerDiscountRules)
+        : [],
       categories: await db
         .select({
           id: t.categories.id,

@@ -450,6 +450,63 @@ run("posting engine", () => {
     expect((await doc(rv.id)).method).toBe("Online");
   });
 
+  it("customer discount rules: fixed category rules are enforced, editable ones can be changed", async () => {
+    const [copies] = await db()
+      .insert(t.products)
+      .values({
+        code: "CP-1",
+        name: "Copy 200pg",
+        category: "Copies",
+        costPrice: 40,
+        salePrice: 100,
+      })
+      .returning();
+    await newDoc({
+      type: "OB",
+      date: today,
+      lines: [{ productId: copies!.id, qty: 50, rate: 40 }],
+    });
+    await db()
+      .insert(t.customerDiscountRules)
+      .values([
+        { customerId, category: "", kind: "pct", value: 10, mode: "editable" },
+        { customerId, category: "Copies", kind: "rs", value: 15, mode: "fixed" },
+      ]);
+    // The screen tries 50% on copies (fixed rule says Rs 15/item) and 5% on a book (editable).
+    const si = await engine.createDocument(maker, {
+      type: "SI",
+      date: today,
+      partyId: customerId,
+      lines: [
+        { productId: copies!.id, qty: 10, rate: 100, discountPct: 50 },
+        { productId: bookId, qty: 2, rate: 100, discountPct: 5 },
+      ],
+    });
+    const lines = await db()
+      .select()
+      .from(t.documentLines)
+      .where(eq(t.documentLines.documentId, si.id))
+      .orderBy(t.documentLines.lineNo);
+    expect(lines[0]!.discountRs).toBe(15);
+    expect(lines[0]!.discountPct).toBe(0);
+    expect(lines[0]!.amount).toBe(850); // 10 × (100 − 15)
+    expect(lines[1]!.discountPct).toBe(5); // editable: kept as entered
+    expect(lines[1]!.amount).toBe(190);
+    expect((await doc(si.id)).total).toBe(1040);
+    await engine.approveDocument(checker, si.id);
+    // A return of a rupee-discounted line credits at the same net price.
+    const sr = await newDoc({
+      type: "SR",
+      date: today,
+      partyId: customerId,
+      refDocId: si.id,
+      extra: { reason: "extra copies" },
+      lines: [{ refLineId: lines[0]!.id, qty: 2 }],
+    });
+    expect((await doc(sr.id)).total).toBe(170);
+    await db().delete(t.customerDiscountRules);
+  });
+
   it("issues unique sequential numbers under concurrent saves", async () => {
     const [head] = await db().select().from(t.expenseHeads).limit(1);
     const ok = await Promise.all(

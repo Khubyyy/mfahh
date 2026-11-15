@@ -53,6 +53,7 @@ async function importFile(page: Page, what: string, file: string, expectRows: nu
 
 async function stockOf(page: Page) {
   await page.goto(`${BASE}/inventory/books`);
+  await page.getByLabel("Search table").fill(BOOK);
   const row = page.getByRole("row").filter({ hasText: BOOK });
   await row.waitFor({ timeout: 15_000 });
   const cells = await row.getByRole("cell").allInnerTexts();

@@ -195,10 +195,40 @@ export interface LineMathInput {
   qty?: number;
   rate?: number;
   discountPct?: number;
+  /** Rupees off each item, before the percentage discount. */
+  discountRs?: number;
 }
 
 export const lineAmount = (l: LineMathInput) =>
-  round2((l.qty ?? 0) * (l.rate ?? 0) * (1 - (l.discountPct ?? 0) / 100));
+  round2(
+    (l.qty ?? 0) *
+      Math.max(0, (l.rate ?? 0) - (l.discountRs ?? 0)) *
+      (1 - (l.discountPct ?? 0) / 100),
+  );
+
+/** A customer discount rule, as applied to one invoice/order line. */
+export interface DiscountRule {
+  category: string;
+  kind: "pct" | "rs";
+  value: number;
+  mode: "fixed" | "editable";
+}
+
+/** The rule for a book: its category's rule if the customer has one, else the default (""). */
+export function ruleFor(rules: DiscountRule[], productCategory: string | null | undefined) {
+  const cat = (productCategory ?? "").toLowerCase();
+  return (
+    rules.find((r) => r.category && r.category.toLowerCase() === cat) ??
+    rules.find((r) => !r.category) ??
+    null
+  );
+}
+
+/** Line discount fields a rule produces. */
+export const ruleDiscount = (r: DiscountRule | null) => ({
+  discountPct: r?.kind === "pct" ? r.value : 0,
+  discountRs: r?.kind === "rs" ? r.value : 0,
+});
 
 /** Invoice-style totals: line discounts, then document discount, then tax on the net. */
 export function docTotals(lines: LineMathInput[], discount = 0, taxPct = 0) {
