@@ -33,22 +33,42 @@ if (!adminUrl || !appPassword) {
   process.exit(1);
 }
 
+/** True when the restricted app user can sign in with DATABASE_URL. */
+async function appLoginWorks() {
+  const url = process.env["DATABASE_URL"];
+  if (!url) return false;
+  const c = postgres(url, { max: 1, connect_timeout: 15, onnotice: () => {}, prepare: false });
+  try {
+    await c`select 1`;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await c.end({ timeout: 2 }).catch(() => {});
+  }
+}
+
 async function main() {
   const sql = postgres(adminUrl!, { max: 1, onnotice: () => {}, prepare: false });
   try {
     const [v] = await sql<{ u: string; v: string }[]>`select current_user as u, version() as v`;
     console.log(`Connected as ${v!.u} — ${String(v!.v).split(",")[0]}`);
 
+    // Only (re)set the app password when it doesn't already work: managed poolers such as
+    // Supabase's cache passwords briefly, so changing it on every run makes the next login fail.
     const exists = await sql`select 1 from pg_roles where rolname = 'mfahh_app'`;
-    const template = exists.length
-      ? "alter role %I with login password %L"
-      : "create role %I with login password %L";
-    const rows = await sql<
-      { q: string }[]
-    >`select format(${template}, 'mfahh_app'::text, ${appPassword!}::text) as q`;
-    const row = rows[0];
-    await sql.unsafe(row!.q);
-    console.log(`Role mfahh_app ${exists.length ? "updated" : "created"}.`);
+    if (exists.length && (await appLoginWorks())) {
+      console.log("Role mfahh_app ready (password unchanged).");
+    } else {
+      const template = exists.length
+        ? "alter role %I with login password %L"
+        : "create role %I with login password %L";
+      const rows = await sql<
+        { q: string }[]
+      >`select format(${template}, 'mfahh_app'::text, ${appPassword!}::text) as q`;
+      await sql.unsafe(rows[0]!.q);
+      console.log(`Role mfahh_app ${exists.length ? "password reset" : "created"}.`);
+    }
 
     await migrate(drizzle(sql), { migrationsFolder: "./migrations" });
     await sql`select apply_app_privileges()`;
@@ -74,6 +94,23 @@ async function main() {
   } finally {
     await sql.end();
   }
+
+  // The pooler may need a little time to pick up a new password: wait for the app login.
+  let ok = await appLoginWorks();
+  for (let i = 1; !ok && i <= 12; i++) {
+    console.log(`Waiting for the database pooler to accept the app login (attempt ${i}/12)…`);
+    await new Promise((r) => setTimeout(r, 10_000));
+    ok = await appLoginWorks();
+  }
+  if (!ok) {
+    console.error(
+      "The app login (DATABASE_URL, user mfahh_app) is still refused. Wait 5 minutes and restart the app; " +
+        "setup will retry without changing the password. If it keeps failing, check DATABASE_URL in .env.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  console.log("App login works.");
 
   // Seed + first admin, reusing the app's own init script.
   const email = process.env["ADMIN_EMAIL"];
